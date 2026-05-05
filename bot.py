@@ -31,7 +31,7 @@ SUNO_BASE_URL = "https://api.sunoapi.org"
 
 DB_PATH = os.getenv("DB_PATH", "kolybelka.db")
 
-MAX_EDITS = 5
+MAX_EDITS = 3
 NUTS_PER_GENERATION = 2
 
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.2")
@@ -575,17 +575,21 @@ async def send_long_text(update: Update, text: str):
 
 
 CREATE_TEXT_WAIT_MESSAGES = [
-    (5, "🐿️ Колыбелка подбирает самые нежные слова 🌙"),
-    (10, "✨ Песенка уже складывается в мягкий ритм 🎵"),
-    (15, "🌙 Почти готово... проверяю, чтобы всё звучало красиво"),
-    (20, "🐿️ Колыбелка чуть задумалась, сейчас всё аккуратно допоёт ✨"),
+    (10, "🐿️ Колыбелка напевает первые строчки... хрум-хрум 🌙"),
+    (20, "🌙 Белочка всё ещё сочиняет, получается очень нежно ✨"),
+    (30, "🐿️ Ещё немного... Колыбелка подбирает мягкие слова 🌰"),
+    (40, "✨ Проверяю ритм, чтобы песенка звучала плавно 🎵"),
+    (50, "🌙 Почти готово... осталось чуть-чуть волшебства"),
+    (60, "🐿️ Колыбелка допевает последние строчки... хрум-хрум ✨"),
 ]
 
 EDIT_TEXT_WAIT_MESSAGES = [
-    (5, "✏️ Колыбелка уже вносит правки и бережёт нежный ритм 🌙"),
-    (10, "✨ Ещё немного... подправляю строки, чтобы песня звучала мягче 🎵"),
-    (15, "🌙 Почти готово... проверяю новые слова и окончания"),
-    (20, "🐿️ Колыбелка внимательно перечитывает текст, чтобы всё было красиво ✨"),
+    (10, "✏️ Колыбелка аккуратно вносит правки... хрум-хрум 🌙"),
+    (20, "✨ Подправляю строки, чтобы песня звучала мягче 🎵"),
+    (30, "🌙 Проверяю новые слова и правильные окончания"),
+    (40, "🐿️ Белочка перечитывает текст, чтобы всё было красиво ✨"),
+    (50, "🌰 Ещё немного... Колыбелка бережёт нежный ритм"),
+    (60, "✨ Почти готово, допеваю обновлённую версию 🌙"),
 ]
 
 
@@ -1883,8 +1887,10 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lullaby_text = data["lullaby_text"]
 
         await update.message.reply_text(
-            f"🎵 {BRAND_NAME} создаёт музыкальную колыбельную...\n\n"
-            f"Сейчас текст превратится в нежную песню для сна 🌙",
+            f"🎵 {BRAND_NAME} начинает напевать колыбельную... 🌙
+
+"
+            f"Сейчас текст превратится в нежную песню для сна ✨",
             reply_markup=generation_wait_keyboard()
         )
 
@@ -1895,23 +1901,102 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_id = await asyncio.to_thread(create_music_task, lullaby_text, style, title)
 
         audio_urls = []
+        total_wait_time = 180  # примерно 3 минуты
+        interval = 10
+        elapsed = 0
 
-        for attempt in range(30):
-            await asyncio.sleep(10)
+        while elapsed < total_wait_time:
+            await asyncio.sleep(interval)
+            elapsed += interval
+
             audio_urls = await asyncio.to_thread(get_music_audio_urls, task_id)
 
             if audio_urls:
                 break
 
-            if attempt == 6:
+            if elapsed == 10:
                 await update.message.reply_text(
-                    "⏳ Музыка ещё создаётся... Уже скоро будет волшебство 🌙",
+                    "🎵 Колыбелка напевает колыбельную... хрум-хрум 🌙",
                     reply_markup=generation_wait_keyboard()
                 )
-
-            if attempt == 14:
+            elif elapsed == 20:
                 await update.message.reply_text(
-                    "🎵 Почти готово. Собираю музыкальную колыбельную...",
+                    "✨ Песенка собирается в музыку, белочка слушает мелодию 🎵",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 30:
+                await update.message.reply_text(
+                    "🐿️ Колыбелка всё ещё поёт... получается нежно 🌰",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 40:
+                await update.message.reply_text(
+                    "🌙 Музыка создаётся, скоро будет сонная песенка ✨",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 50:
+                await update.message.reply_text(
+                    "🎵 Белочка проверяет, чтобы голос звучал мягко и спокойно",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 60:
+                await update.message.reply_text(
+                    "✨ Осталось примерно 2 минуты... Колыбелка продолжает напевать 🌙",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 70:
+                await update.message.reply_text(
+                    "🐿️ Хрум-хрум... мелодия становится всё теплее 🌰",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 80:
+                await update.message.reply_text(
+                    "🌙 Колыбельная ещё создаётся, спасибо за терпение ✨",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 90:
+                await update.message.reply_text(
+                    "🎵 Белочка слушает припев и собирает песенку целиком",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 100:
+                await update.message.reply_text(
+                    "🐿️ Ещё немного хрум-хрум... музыка почти раскрылась 🌙",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 110:
+                await update.message.reply_text(
+                    "✨ Колыбелка бережно допевает последние нотки 🎵",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 120:
+                await update.message.reply_text(
+                    "🌙 Осталась примерно 1 минута... уже совсем скоро ✨",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 130:
+                await update.message.reply_text(
+                    "🎵 Песенка почти готова, белочка ждёт финальный звук",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 140:
+                await update.message.reply_text(
+                    "🐿️ Хрум-хрум... Колыбелка собирает файл с музыкой 🌰",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 150:
+                await update.message.reply_text(
+                    "✨ Совсем близко... проверяю музыкальную колыбельную 🌙",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 160:
+                await update.message.reply_text(
+                    "🎵 Ещё чуть-чуть, песенка почти прилетела",
+                    reply_markup=generation_wait_keyboard()
+                )
+            elif elapsed == 170:
+                await update.message.reply_text(
+                    "🌙 Последние секунды ожидания... Колыбелка рядом ✨",
                     reply_markup=generation_wait_keyboard()
                 )
 
