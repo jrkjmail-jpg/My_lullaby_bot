@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import sqlite3
 import asyncio
 import tempfile
@@ -28,10 +29,13 @@ SUNO_API_KEY = os.getenv("SUNO_API_KEY")
 OPENAI_CLIENT = OpenAI(api_key=OPENAI_API_KEY)
 SUNO_BASE_URL = "https://api.sunoapi.org"
 
-DB_PATH = "kolybelka.db"
+DB_PATH = os.getenv("DB_PATH", "kolybelka.db")
 
 MAX_EDITS = 5
 NUTS_PER_GENERATION = 2
+
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.2")
+SUNO_MODEL = os.getenv("SUNO_MODEL", "V5_5")
 
 NUT_PACKAGES = {
     "🌰 Купить 3 орешка": 3,
@@ -58,7 +62,6 @@ NUT_PACKAGES = {
     GENERATE_MUSIC,
 ) = range(16)
 
-
 BAD_WORDS = [
     "дурак", "дура", "идиот", "идиотка", "тупой", "тупая",
     "блять", "блядь", "сука", "хуй", "пизда", "ебать",
@@ -77,6 +80,9 @@ UNSAFE_CHILD_TOPICS = [
 
 RUSSIAN_VOWELS_UPPER = "АЕЁИОУЫЭЮЯ"
 STRESS_MARK = "\u0301"
+
+# Защита от двойной генерации музыки одним пользователем
+USER_MUSIC_LOCKS = set()
 
 
 # =========================
@@ -159,15 +165,38 @@ def create_music_keyboard():
 # БАЗА ДАННЫХ
 # =========================
 
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            nuts INTEGER DEFAULT 0
+            nuts INTEGER DEFAULT 0,
+            created_at INTEGER DEFAULT (strftime('%s','now')),
+            updated_at INTEGER DEFAULT (strftime('%s','now'))
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS generations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            child_name TEXT,
+            title TEXT,
+            lyrics TEXT,
+            status TEXT DEFAULT 'created',
+            task_id TEXT,
+            audio_url TEXT,
+            created_at INTEGER DEFAULT (strftime('%s','now'))
         )
     """)
 
@@ -176,12 +205,15 @@ def init_db():
 
 
 def create_user_if_not_exists(user):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
 
     cur.execute("""
-        INSERT OR IGNORE INTO users (user_id, username, nuts)
+        INSERT INTO users (user_id, username, nuts)
         VALUES (?, ?, 0)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username = excluded.username,
+            updated_at = strftime('%s','now')
     """, (user.id, user.username))
 
     conn.commit()
@@ -189,24 +221,23 @@ def create_user_if_not_exists(user):
 
 
 def get_nuts(user_id):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
 
     cur.execute("SELECT nuts FROM users WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
 
     conn.close()
-
     return row[0] if row else 0
 
 
 def add_nuts(user_id, amount):
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_db_connection()
     cur = conn.cursor()
 
     cur.execute("""
         UPDATE users
-        SET nuts = nuts + ?
+        SET nuts = nuts + ?, updated_at = strftime('%s','now')
         WHERE user_id = ?
     """, (amount, user_id))
 
@@ -214,18 +245,47 @@ def add_nuts(user_id, amount):
     conn.close()
 
 
-def remove_nuts(user_id, amount):
-    conn = sqlite3.connect(DB_PATH)
+def remove_nuts_safe(user_id, amount):
+    """
+    Атомарно списывает орешки.
+    Возвращает True, если списание реально произошло.
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("""
+            UPDATE users
+            SET nuts = nuts - ?, updated_at = strftime('%s','now')
+            WHERE user_id = ? AND nuts >= ?
+        """, (amount, user_id, amount))
+
+        success = cur.rowcount > 0
+        conn.commit()
+        return success
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
+def save_generation(user_id, child_name, title, lyrics, status="created", task_id=None, audio_url=None):
+    conn = get_db_connection()
     cur = conn.cursor()
 
     cur.execute("""
-        UPDATE users
-        SET nuts = nuts - ?
-        WHERE user_id = ? AND nuts >= ?
-    """, (amount, user_id, amount))
+        INSERT INTO generations (user_id, child_name, title, lyrics, status, task_id, audio_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, child_name, title, lyrics, status, task_id, audio_url))
 
+    generation_id = cur.lastrowid
     conn.commit()
     conn.close()
+    return generation_id
 
 
 # =========================
@@ -443,7 +503,7 @@ def validate_name(name):
     if not re.fullmatch(r"[А-Яа-яЁёA-Za-z\- ]+", name.strip()):
         return False, "🌙 В имени можно использовать только буквы."
 
-    plain_name, stressed_name, stress_error = make_stressed_name(name)
+    _, _, stress_error = make_stressed_name(name)
 
     if stress_error:
         return False, stress_error
@@ -556,6 +616,24 @@ async def run_with_wait_messages(update: Update, func, *args, wait_messages=None
 # OPENAI
 # =========================
 
+def openai_text_response(prompt, retries=3):
+    last_error = None
+
+    for attempt in range(retries):
+        try:
+            response = OPENAI_CLIENT.responses.create(
+                model=OPENAI_MODEL,
+                input=prompt,
+            )
+            return response.output_text.strip()
+        except Exception as error:
+            last_error = error
+            if attempt < retries - 1:
+                time.sleep(2 + attempt * 2)
+
+    raise last_error
+
+
 def get_age_context(data):
     years = data.get("age_years", 0)
 
@@ -638,12 +716,7 @@ def generate_lullaby_text(data):
 - верни только текст песни
 """
 
-    response = OPENAI_CLIENT.responses.create(
-        model="gpt-5.2",
-        input=prompt
-    )
-
-    return response.output_text
+    return openai_text_response(prompt)
 
 
 def edit_lullaby_text(data, old_text, edit_request):
@@ -690,12 +763,7 @@ def edit_lullaby_text(data, old_text, edit_request):
 - верни только новый текст песни
 """
 
-    response = OPENAI_CLIENT.responses.create(
-        model="gpt-5.2",
-        input=prompt
-    )
-
-    return response.output_text
+    return openai_text_response(prompt)
 
 
 def polish_lullaby_text(data, text):
@@ -731,12 +799,7 @@ def polish_lullaby_text(data, text):
 {text}
 """
 
-    response = OPENAI_CLIENT.responses.create(
-        model="gpt-5.2",
-        input=prompt
-    )
-
-    return response.output_text
+    return openai_text_response(prompt)
 
 
 def add_stress_marks_to_song(data, text):
@@ -765,12 +828,7 @@ def add_stress_marks_to_song(data, text):
 {text}
 """
 
-    response = OPENAI_CLIENT.responses.create(
-        model="gpt-5.2",
-        input=prompt
-    )
-
-    return response.output_text
+    return openai_text_response(prompt)
 
 
 def safety_repair_and_note(data, text):
@@ -792,13 +850,15 @@ def prepare_final_lyrics(data, raw_text):
 
 
 def generate_and_prepare_lullaby(data):
-    raw_text = generate_lullaby_text(data)
-    return prepare_final_lyrics(data, raw_text)
+    data_copy = dict(data)
+    raw_text = generate_lullaby_text(data_copy)
+    return prepare_final_lyrics(data_copy, raw_text)
 
 
 def edit_and_prepare_lullaby(data, old_text, edit_request):
-    raw_new_text = edit_lullaby_text(data, old_text, edit_request)
-    return prepare_final_lyrics(data, raw_new_text)
+    data_copy = dict(data)
+    raw_new_text = edit_lullaby_text(data_copy, old_text, edit_request)
+    return prepare_final_lyrics(data_copy, raw_new_text)
 
 
 # =========================
@@ -828,6 +888,22 @@ def make_music_style(data):
     )
 
 
+def suno_request(method, url, retries=3, **kwargs):
+    last_error = None
+
+    for attempt in range(retries):
+        try:
+            response = requests.request(method, url, timeout=kwargs.pop("timeout", 60), **kwargs)
+            response.raise_for_status()
+            return response
+        except Exception as error:
+            last_error = error
+            if attempt < retries - 1:
+                time.sleep(3 + attempt * 3)
+
+    raise last_error
+
+
 def create_music_task(lyrics, style, title):
     headers = {
         "Authorization": f"Bearer {SUNO_API_KEY}",
@@ -837,22 +913,23 @@ def create_music_task(lyrics, style, title):
     data = {
         "customMode": True,
         "instrumental": False,
-        "model": "V5_5",
+        "model": SUNO_MODEL,
         "prompt": lyrics,
         "style": style,
         "title": title,
         "callBackUrl": "https://example.com/callback"
     }
 
-    response = requests.post(
+    response = suno_request(
+        "POST",
         f"{SUNO_BASE_URL}/api/v1/generate",
         headers=headers,
         json=data,
-        timeout=60
+        timeout=60,
     )
 
-    response.raise_for_status()
-    return response.json()["data"]["taskId"]
+    result = response.json()
+    return result["data"]["taskId"]
 
 
 def get_music_audio_urls(task_id):
@@ -860,20 +937,21 @@ def get_music_audio_urls(task_id):
         "Authorization": f"Bearer {SUNO_API_KEY}"
     }
 
-    response = requests.get(
+    response = suno_request(
+        "GET",
         f"{SUNO_BASE_URL}/api/v1/generate/record-info",
         headers=headers,
         params={"taskId": task_id},
-        timeout=60
+        timeout=60,
     )
 
-    response.raise_for_status()
     result = response.json()
+    data = result.get("data") or {}
 
-    if result["data"]["status"] != "SUCCESS":
+    if data.get("status") != "SUCCESS":
         return []
 
-    songs = result["data"]["response"].get("sunoData", [])
+    songs = (data.get("response") or {}).get("sunoData", [])
     urls = []
 
     for song in songs:
@@ -908,16 +986,16 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     create_user_if_not_exists(update.effective_user)
 
     await update.message.reply_text(
-    f"🌙 Добро пожаловать в {BRAND_NAME}!\n\n"
-    f"Я создаю персональные музыкальные колыбельные для детей 💫\n\n"
-    f"🎵 В каждой песне:\n"
-    f"— имя ребёнка\n"
-    f"— любимые персонажи\n"
-    f"— нежный голос и спокойная музыка\n\n"
-    f"✨ Получается настоящая колыбельная, под которую ребёнок засыпает быстрее и спокойнее 🌙\n\n"
-    f"🌰 1 музыкальная колыбельная = {NUTS_PER_GENERATION} орешка\n\n"
-    f"💛 Давай создадим первую прямо сейчас:",
-    reply_markup=main_menu_keyboard()
+        f"🌙 Добро пожаловать в {BRAND_NAME}!\n\n"
+        f"Я создаю персональные музыкальные колыбельные для детей 💫\n\n"
+        f"🎵 В каждой песне:\n"
+        f"— имя ребёнка\n"
+        f"— любимые персонажи\n"
+        f"— нежный голос и спокойная музыка\n\n"
+        f"✨ Получается настоящая колыбельная, под которую ребёнок засыпает быстрее и спокойнее 🌙\n\n"
+        f"🌰 1 музыкальная колыбельная = {NUTS_PER_GENERATION} орешка\n\n"
+        f"💛 Давай создадим первую прямо сейчас:",
+        reply_markup=main_menu_keyboard()
     )
 
     return START
@@ -1778,24 +1856,38 @@ async def generate_music_button(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    nuts = get_nuts(user_id)
 
-    if nuts < NUTS_PER_GENERATION:
-        await offer_buy_nuts(update, user_id)
+    if user_id in USER_MUSIC_LOCKS:
+        await update.message.reply_text(
+            "🎵 Музыкальная колыбельная уже создаётся.\n\n"
+            "Пожалуйста, дождись результата 🌙",
+            reply_markup=generation_wait_keyboard()
+        )
+        return GENERATE_MUSIC
+
+    if "lullaby_text" not in context.user_data:
+        await update.message.reply_text(
+            "🌙 Текст колыбельной не найден. Давай начнём создание заново.",
+            reply_markup=main_menu_keyboard()
+        )
         return START
 
-    remove_nuts(user_id, NUTS_PER_GENERATION)
-
-    data = context.user_data
-    lullaby_text = data["lullaby_text"]
-
-    await update.message.reply_text(
-        f"🎵 {BRAND_NAME} создаёт музыкальную колыбельную...\n\n"
-        f"Сейчас текст превратится в нежную песню для сна 🌙",
-        reply_markup=generation_wait_keyboard()
-    )
+    USER_MUSIC_LOCKS.add(user_id)
 
     try:
+        if not remove_nuts_safe(user_id, NUTS_PER_GENERATION):
+            await offer_buy_nuts(update, user_id)
+            return START
+
+        data = dict(context.user_data)
+        lullaby_text = data["lullaby_text"]
+
+        await update.message.reply_text(
+            f"🎵 {BRAND_NAME} создаёт музыкальную колыбельную...\n\n"
+            f"Сейчас текст превратится в нежную песню для сна 🌙",
+            reply_markup=generation_wait_keyboard()
+        )
+
         genitive_name = make_genitive_name(data["name"])
         title = f"Колыбельная для {genitive_name}"
         style = make_music_style(data)
@@ -1834,8 +1926,18 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return START
 
-        safe_title = clean_filename(title)
         audio_url = audio_urls[0]
+        save_generation(
+            user_id=user_id,
+            child_name=data.get("name"),
+            title=title,
+            lyrics=lullaby_text,
+            status="success",
+            task_id=task_id,
+            audio_url=audio_url,
+        )
+
+        safe_title = clean_filename(title)
 
         await update.message.reply_text(
             "✨ Готово! Колыбельная создана 🎵",
@@ -1845,21 +1947,22 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filename = f"{safe_title}.mp3"
         file_path = await asyncio.to_thread(download_audio, audio_url, filename)
 
-        with open(file_path, "rb") as audio_file:
-            await update.message.reply_document(
-                document=audio_file,
-                filename=filename,
-                caption=f"🌙 {title}",
-                read_timeout=180,
-                write_timeout=180,
-                connect_timeout=60,
-                pool_timeout=180
-            )
-
-        os.remove(file_path)
+        try:
+            with open(file_path, "rb") as audio_file:
+                await update.message.reply_document(
+                    document=audio_file,
+                    filename=filename,
+                    caption=f"🌙 {title}",
+                    read_timeout=180,
+                    write_timeout=180,
+                    connect_timeout=60,
+                    pool_timeout=180
+                )
+        finally:
+            if os.path.exists(file_path):
+                os.remove(file_path)
 
         balance = get_nuts(user_id)
-
         context.user_data.clear()
 
         await update.message.reply_text(
@@ -1874,7 +1977,6 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as error:
         print("Ошибка Suno/музыки:", error)
-
         add_nuts(user_id, NUTS_PER_GENERATION)
 
         await update.message.reply_text(
@@ -1884,6 +1986,9 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu_keyboard()
         )
         return START
+
+    finally:
+        USER_MUSIC_LOCKS.discard(user_id)
 
 
 # =========================
@@ -1904,6 +2009,15 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     print("⚠️ Ошибка Telegram/сети:", context.error)
+
+    try:
+        if update and getattr(update, "message", None):
+            await update.message.reply_text(
+                "🌙 Что-то пошло не так. Попробуй ещё раз или нажми «🔄 Начать заново».",
+                reply_markup=main_menu_keyboard()
+            )
+    except Exception as error:
+        print("Не удалось отправить сообщение об ошибке:", error)
 
 
 def main():
