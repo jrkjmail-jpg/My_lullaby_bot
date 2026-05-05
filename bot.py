@@ -752,12 +752,13 @@ async def gender_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def age_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     age = update.message.text
 
-    ok, message = validate_age(age)
-    if not ok:
-        await update.message.reply_text(message)
-        return AGE_INPUT
-
     parsed = parse_age(age)
+
+    if not parsed:
+        await update.message.reply_text(
+            "🌙 Возраст нужно написать так:\n\n2\n3,5\n3,10"
+        )
+        return AGE_INPUT
 
     context.user_data["age"] = parsed["display"]
 
