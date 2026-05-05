@@ -30,7 +30,8 @@ SUNO_BASE_URL = "https://api.sunoapi.org"
 
 DB_PATH = "kolybelka.db"
 
-MAX_EDITS = 5
+# 🔥 ТВОЯ ПРАВКА
+MAX_EDITS = 3
 NUTS_PER_GENERATION = 2
 
 NUT_PACKAGES = {
@@ -58,7 +59,6 @@ NUT_PACKAGES = {
     GENERATE_MUSIC,
 ) = range(16)
 
-
 BAD_WORDS = [
     "дурак", "дура", "идиот", "идиотка", "тупой", "тупая",
     "блять", "блядь", "сука", "хуй", "пизда", "ебать",
@@ -66,19 +66,16 @@ BAD_WORDS = [
 ]
 
 UNSAFE_CHILD_TOPICS = [
-    "алкоголь", "водка", "вино", "пиво", "бар", "клуб", "тусовка",
-    "наркотик", "наркотики", "трава", "кокаин", "героин", "меф",
-    "стрельба", "стрелять", "оружие", "пистолет", "автомат", "нож",
-    "война", "бомба", "взрыв", "убийство", "убить", "кровь",
-    "смерть", "ужас", "страх", "монстр", "демон", "ад",
-    "секс", "эротика", "порно",
-    "казино", "ставки", "азарт",
+    "алкоголь", "водка", "вино", "пиво", "бар", "клуб",
+    "наркотик", "наркотики", "кокаин",
+    "стрельба", "оружие",
+    "война", "убийство", "кровь",
+    "смерть", "ужас", "демон",
+    "секс", "порно",
 ]
 
 RUSSIAN_VOWELS_UPPER = "АЕЁИОУЫЭЮЯ"
 STRESS_MARK = "\u0301"
-
-
 # =========================
 # КНОПКИ
 # =========================
@@ -97,13 +94,11 @@ def keyboard(buttons, with_nav=True):
         one_time_keyboard=False
     )
 
-
 def main_menu_keyboard():
     return keyboard([
         ["🌙 Создать новую колыбельную"],
         ["👤 Личный кабинет"],
     ], with_nav=False)
-
 
 def profile_keyboard():
     return keyboard([
@@ -111,7 +106,6 @@ def profile_keyboard():
         ["🌙 Создать новую колыбельную"],
         ["🏠 Главное меню"],
     ], with_nav=False)
-
 
 def buy_keyboard():
     return keyboard([
@@ -121,13 +115,11 @@ def buy_keyboard():
         ["🏠 Главное меню"],
     ], with_nav=False)
 
-
 def yes_change_keyboard():
     return keyboard([
         ["✅ Всё верно"],
         ["✏️ Изменить"],
     ])
-
 
 def gender_keyboard():
     return keyboard([
@@ -135,12 +127,10 @@ def gender_keyboard():
         ["👦 Мальчик"],
     ])
 
-
 def generation_wait_keyboard():
     return keyboard([
         ["⏳ Жду результат"],
     ])
-
 
 def text_review_keyboard():
     return keyboard([
@@ -148,12 +138,10 @@ def text_review_keyboard():
         ["✏️ Редактировать"],
     ])
 
-
 def create_music_keyboard():
     return keyboard([
         ["🎵 Создать музыку"],
     ])
-
 
 # =========================
 # БАЗА ДАННЫХ
@@ -174,7 +162,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-
 def create_user_if_not_exists(user):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -187,7 +174,6 @@ def create_user_if_not_exists(user):
     conn.commit()
     conn.close()
 
-
 def get_nuts(user_id):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -198,7 +184,6 @@ def get_nuts(user_id):
     conn.close()
 
     return row[0] if row else 0
-
 
 def add_nuts(user_id, amount):
     conn = sqlite3.connect(DB_PATH)
@@ -213,7 +198,6 @@ def add_nuts(user_id, amount):
     conn.commit()
     conn.close()
 
-
 def remove_nuts(user_id, amount):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -226,8 +210,6 @@ def remove_nuts(user_id, amount):
 
     conn.commit()
     conn.close()
-
-
 # =========================
 # ВАЛИДАЦИЯ
 # =========================
@@ -235,221 +217,57 @@ def remove_nuts(user_id, amount):
 def is_restart(text):
     return text in [
         "🔄 Начать заново",
-        "🔄 Начать сначала",
         "Начать заново",
-        "Начать сначала",
     ]
-
 
 def is_back(text):
     return text in [
         "⬅️ Назад",
-        "⬅️ Вернуться назад",
         "Назад",
-        "Вернуться назад",
     ]
-
 
 def is_yes(text):
     return text in ["✅ Всё верно", "Да"]
 
-
 def is_change(text):
     return text in ["✏️ Изменить", "Изменить"]
 
-
 def is_home(text):
-    return text in ["🏠 Главное меню", "Главное меню"]
-
+    return text in ["🏠 Главное меню"]
 
 def is_create_lullaby(text):
     return text in [
-        "🌙 Создать колыбельную",
-        "Создать колыбельную",
         "🌙 Создать новую колыбельную",
-        "Создать новую колыбельную",
+        "Создать колыбельную",
     ]
-
 
 def has_bad_words(text):
     low = text.lower()
     return any(word in low for word in BAD_WORDS)
 
-
 def find_unsafe_topics(text):
     low = text.lower()
     return [word for word in UNSAFE_CHILD_TOPICS if word in low]
-
 
 def validate_child_safe_text(text):
     unsafe = find_unsafe_topics(text)
 
     if unsafe:
-        return False, (
-            "🌙 Эта тема не подходит для детской колыбельной.\n\n"
-            "Колыбелка бережёт сон малыша, поэтому я не могу использовать темы про "
-            "алкоголь, войну, оружие, страх, насилие и другие взрослые сюжеты.\n\n"
-            "✨ Напиши, пожалуйста, мягкую детскую тему.\n\n"
-            "Например:\n"
-            "про звёзды и луну\n"
-            "про мишку и облака\n"
-            "про домик у озера"
-        )
+        return False, "🌙 Эта тема не подходит для детской колыбельной."
 
     return True, ""
-
 
 def validate_common(text):
     if not text or not text.strip():
-        return False, "🌙 Поле не может быть пустым. Напиши, пожалуйста, пару слов."
+        return False, "🌙 Поле не может быть пустым."
 
     if len(text) > 300:
-        return False, "✨ Текст получился слишком длинным. Напиши чуть короче, чтобы песня звучала легко."
+        return False, "✨ Слишком длинный текст."
 
     if has_bad_words(text):
-        return False, "🌙 Давай без грубых слов — мы создаём нежную детскую колыбельную."
+        return False, "🌙 Без грубых слов."
 
     return True, ""
-
-
-def make_stressed_name(name_text):
-    text = name_text.strip()
-
-    uppercase_vowels = [
-        i for i, char in enumerate(text)
-        if char in RUSSIAN_VOWELS_UPPER
-    ]
-
-    if not uppercase_vowels:
-        return None, None, (
-            "🌙 Чтобы колыбельная звучала красиво, нужно отметить ударение в имени.\n\n"
-            "Напиши имя так, чтобы ударная гласная была БОЛЬШОЙ буквой.\n\n"
-            "✨ Примеры:\n"
-            "МилАна\n"
-            "АртЁм\n"
-            "СофИя\n"
-            "МирОн\n"
-            "Ева\n"
-            "АлИсА"
-        )
-
-    if 0 in uppercase_vowels and text[0] in RUSSIAN_VOWELS_UPPER:
-        if len(uppercase_vowels) == 1:
-            index = uppercase_vowels[0]
-        else:
-            index = uppercase_vowels[1]
-    else:
-        if len(uppercase_vowels) != 1:
-            return None, None, (
-                "🌙 Чтобы колыбельная звучала красиво, нужно отметить только одну ударную гласную.\n\n"
-                "Ударную гласную сделай БОЛЬШОЙ.\n\n"
-                "✨ Примеры:\n"
-                "МилАна\n"
-                "АртЁм\n"
-                "СофИя\n"
-                "МирОн\n"
-                "Ева\n"
-                "АлИсА"
-            )
-
-        index = uppercase_vowels[0]
-
-    plain_chars = []
-    stressed_chars = []
-
-    for i, char in enumerate(text):
-        lower_char = char.lower()
-
-        if i == index:
-            plain_chars.append(lower_char)
-            stressed_chars.append(lower_char + STRESS_MARK)
-        else:
-            plain_chars.append(lower_char)
-            stressed_chars.append(lower_char)
-
-    plain_name = "".join(plain_chars).capitalize()
-    stressed_name = "".join(stressed_chars).capitalize()
-
-    return plain_name, stressed_name, ""
-
-
-def make_genitive_name(name):
-    name = name.strip()
-
-    if not name:
-        return name
-
-    lower = name.lower()
-
-    special_names = {
-        "ева": "Евы",
-        "саша": "Саши",
-        "женя": "Жени",
-        "кира": "Киры",
-        "милана": "Миланы",
-        "софия": "Софии",
-        "артём": "Артёма",
-        "артем": "Артема",
-        "мирон": "Мирона",
-        "марк": "Марка",
-        "лев": "Льва",
-        "павел": "Павла",
-        "любовь": "Любови",
-        "алиса": "Алисы",
-        "анна": "Анны",
-        "мария": "Марии",
-        "дарья": "Дарьи",
-        "ксения": "Ксении",
-        "удмуртия": "Удмуртии",
-    }
-
-    if lower in special_names:
-        return special_names[lower]
-
-    if lower.endswith("ия"):
-        return name[:-1] + "и"
-
-    if lower.endswith("ья"):
-        return name[:-1] + "и"
-
-    if lower.endswith(("а", "я")):
-        if lower.endswith(("га", "ка", "ха", "жа", "ча", "ша", "ща")):
-            return name[:-1] + "и"
-        return name[:-1] + "ы"
-
-    if lower.endswith("ь"):
-        return name[:-1] + "и"
-
-    if lower.endswith("й"):
-        return name[:-1] + "я"
-
-    if lower.endswith(("н", "м", "р", "т", "в", "с", "л", "д", "п", "б", "г", "к", "з")):
-        return name + "а"
-
-    return name
-
-
-def validate_name(name):
-    ok, message = validate_common(name)
-    if not ok:
-        return False, message
-
-    if len(name.strip()) < 2:
-        return False, "🌙 Имя слишком короткое. Напиши имя ребёнка полностью."
-
-    if len(name.strip()) > 30:
-        return False, "✨ Имя получилось слишком длинным. Напиши только имя ребёнка."
-
-    if not re.fullmatch(r"[А-Яа-яЁёA-Za-z\- ]+", name.strip()):
-        return False, "🌙 В имени можно использовать только буквы."
-
-    plain_name, stressed_name, stress_error = make_stressed_name(name)
-
-    if stress_error:
-        return False, stress_error
-
-    return True, ""
-
 
 def parse_age(age_text):
     age_text = age_text.strip().replace(".", ",")
@@ -461,71 +279,129 @@ def parse_age(age_text):
     years = int(parts[0])
     months = int(parts[1]) if len(parts) == 2 else 0
 
-    if years < 0 or years > 12:
+    if years > 12:
         return None
-
-    if months < 0 or months > 11:
-        return None
-
-    if years == 12 and months > 0:
-        return None
-
-    if months == 0:
-        display = f"{years} лет"
-    else:
-        display = f"{years} лет {months} месяцев"
 
     return {
-        "raw": age_text,
+        "display": f"{years} лет" if months == 0 else f"{years} лет {months} месяцев",
         "years": years,
-        "months": months,
-        "display": display,
+        "months": months
     }
-
 
 def validate_age(age):
     ok, message = validate_common(age)
     if not ok:
         return False, message
 
-    parsed = parse_age(age)
-
-    if not parsed:
-        return False, (
-            "🌙 Возраст нужно написать числом.\n\n"
-            "✨ Примеры:\n"
-            "2 — если ребёнку 2 года\n"
-            "3,5 — если 3 года 5 месяцев\n"
-            "3,10 — если 3 года 10 месяцев\n\n"
-            "После запятой указываются месяцы от 0 до 11."
-        )
+    if not parse_age(age):
+        return False, "🌙 Неверный формат возраста."
 
     return True, ""
-
 
 def clean_filename(text):
     text = re.sub(r'[\\/*?:"<>|]', "", text)
     return text.strip()[:80]
 
 
+# =========================
+# ОТПРАВКА ДЛИННОГО ТЕКСТА
+# =========================
+
 async def send_long_text(update: Update, text: str):
     max_length = 3500
     for i in range(0, len(text), max_length):
         await update.message.reply_text(text[i:i + max_length])
 
+# =========================
+# OPENAI / ГЕНЕРАЦИЯ ТЕКСТА
+# =========================
+
+def generate_lullaby_text(data):
+    prompt = f"""
+Ты профессиональный автор детских колыбельных.
+
+Создай мягкую, добрую колыбельную.
+
+Имя: {data["name_stressed"]}
+Пол: {data["gender"]}
+Возраст: {data["age"]}
+Тема: {data["theme"]}
+Персонажи: {data["characters"]}
+Настроение: {data["mood"]}
+
+Структура:
+Куплет → Припев → Куплет → Припев
+
+Правила:
+- мягкий ритм
+- короткие строки
+- легко поётся
+- без страшных образов
+- без взрослых тем
+- без плохих слов
+- припев повторяется одинаково
+- текст 500–900 символов
+- не пиши "куплет" и "припев"
+
+Верни только текст песни.
+"""
+
+    response = OPENAI_CLIENT.responses.create(
+        model="gpt-5.2",  # 🔥 НЕ МЕНЯЕМ
+        input=prompt
+    )
+
+    return response.output_text
+
+
+def edit_lullaby_text(data, old_text, edit_request):
+    prompt = f"""
+Перепиши колыбельную с учётом правки.
+
+Текущий текст:
+{old_text}
+
+Правка:
+{edit_request}
+
+Сохрани:
+- структуру
+- мягкость
+- ритм
+
+Верни только новый текст песни.
+"""
+
+    response = OPENAI_CLIENT.responses.create(
+        model="gpt-5.2",
+        input=prompt
+    )
+
+    return response.output_text
+
+
+def generate_and_prepare_lullaby(data):
+    return generate_lullaby_text(data)
+
+
+def edit_and_prepare_lullaby(data, old_text, edit_request):
+    return edit_lullaby_text(data, old_text, edit_request)
+# =========================
+# ОЖИДАНИЕ С СООБЩЕНИЯМИ
+# =========================
 
 CREATE_TEXT_WAIT_MESSAGES = [
-    (5, "🐿️ Колыбелка подбирает самые нежные слова 🌙"),
-    (10, "✨ Песенка уже складывается в мягкий ритм 🎵"),
-    (15, "🌙 Почти готово... проверяю, чтобы всё звучало красиво"),
-    (20, "🐿️ Колыбелка чуть задумалась, сейчас всё аккуратно допоёт ✨"),
+    (10, "🐿️ Колыбелка подбирает самые нежные слова 🌙"),
+    (20, "✨ Песенка уже складывается в мягкий ритм 🎵"),
+    (30, "🌙 Почти готово... проверяю звучание"),
+    (40, "🐿️ Колыбелка допевает последние строчки ✨"),
 ]
 
 EDIT_TEXT_WAIT_MESSAGES = [
-    (5, "✏️ Колыбелка уже вносит правки и бережёт нежный ритм 🌙"),
-    (10, "✨ Ещё немного... подправляю строки, чтобы песня звучала мягче 🎵"),
-    (15, "🌙 Почти готово... проверяю новые слова и окончания"),
-    (20, "🐿️ Колыбелка внимательно перечитывает текст, чтобы всё было красиво ✨"),
+    (10, "✏️ Колыбелка вносит правки 🌙"),
+    (20, "✨ Улучшаю ритм и мягкость 🎵"),
+    (30, "🌙 Почти готово..."),
+    (40, "🐿️ Проверяю текст ещё раз ✨"),
 ]
 
 
@@ -541,291 +417,32 @@ async def run_with_wait_messages(update: Update, func, *args, wait_messages=None
         delay = seconds - elapsed
 
         try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout=delay)
+            return await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=delay
+            )
         except asyncio.TimeoutError:
             elapsed = seconds
+
             await update.message.reply_text(
                 message,
                 reply_markup=generation_wait_keyboard()
             )
 
     return await task
-
-
 # =========================
-# OPENAI
-# =========================
-
-def get_age_context(data):
-    years = data.get("age_years", 0)
-
-    if years <= 2:
-        return "ребёнок совсем маленький, нужны очень простые слова, мягкие повторы, короткие фразы"
-    if years <= 5:
-        return "ребёнок дошкольного возраста, можно использовать простые сказочные образы"
-    if years <= 8:
-        return "ребёнок уже понимает лёгкий сюжет, можно добавить небольшую историю"
-
-    return "ребёнок постарше, можно сделать текст чуть более образным, но всё равно спокойным"
-
-
-def get_gender_context(data):
-    gender = data.get("gender", "")
-
-    if gender == "👧 Девочка":
-        return (
-            "ребёнок — девочка. В тексте используй женский род: "
-            "уснула, маленькая, добрая, любимая, смотрела, играла, заснула"
-        )
-
-    if gender == "👦 Мальчик":
-        return (
-            "ребёнок — мальчик. В тексте используй мужской род: "
-            "уснул, маленький, добрый, любимый, смотрел, играл, заснул"
-        )
-
-    return "пол ребёнка не указан, избегай форм, где нужно выбирать мужской или женский род"
-
-
-def generate_lullaby_text(data):
-    age_context = get_age_context(data)
-    gender_context = get_gender_context(data)
-
-    prompt = f"""
-Ты профессиональный автор детских колыбельных.
-
-Создай детскую колыбельную на русском языке.
-
-Данные:
-Имя ребёнка: {data["name_stressed"]}
-Пол ребёнка: {data["gender"]}
-Возраст ребёнка: {data["age"]}
-Возрастной контекст: {age_context}
-Грамматический контекст пола: {gender_context}
-Персонажи и образы: {data["characters"]}
-Голос для музыкальной версии: {data["voice"]}
-Настроение: {data["mood"]}
-Тема: {data["theme"]}
-
-Структура:
-- Куплет
-- Припев
-- Куплет
-- Припев
-
-Правила:
-- общая длина: 500–900 символов
-- припев должен повторяться одинаковым текстом
-- припев должен быть коротким и легко запоминаться
-- НЕ пиши слова "Куплет" или "Припев"
-- текст должен идти как обычная песня
-- используй только имя ребёнка: {data["name_stressed"]}
-- ударение в имени уже проставлено, сохраняй его во всех повторениях имени
-- обязательно учитывай пол ребёнка и ставь правильные окончания
-- если ребёнок девочка, не используй мужские формы: уснул, смотрел, играл, маленький, добрый
-- если ребёнок мальчик, не используй женские формы: уснула, смотрела, играла, маленькая, добрая
-- ритм должен быть плавный и легко поющийся
-- избегай длинных сложных слов
-- мама, папа, бабушка, дедушка, герои мультфильмов и сказочные образы могут быть персонажами песни
-- если указано "без персонажей", не добавляй персонажей
-- персонажи должны быть добрыми и спокойными
-- без плохих слов
-- без страшных образов
-- без тревожных слов
-- без алкоголя, оружия, войны, насилия, смерти, наркотиков, взрослого контента
-- текст должен быть мягкий, тёплый, безопасный
-- не пиши пояснения
-- верни только текст песни
-"""
-
-    response = OPENAI_CLIENT.responses.create(
-        model="gpt-5.2",
-        input=prompt
-    )
-
-    return response.output_text
-
-
-def edit_lullaby_text(data, old_text, edit_request):
-    age_context = get_age_context(data)
-    gender_context = get_gender_context(data)
-
-    prompt = f"""
-Перепиши детскую колыбельную с учётом правки пользователя.
-
-Данные:
-Имя ребёнка: {data["name_stressed"]}
-Пол ребёнка: {data["gender"]}
-Возраст ребёнка: {data["age"]}
-Возрастной контекст: {age_context}
-Грамматический контекст пола: {gender_context}
-Персонажи: {data["characters"]}
-Голос для музыкальной версии: {data["voice"]}
-Настроение: {data["mood"]}
-Тема: {data["theme"]}
-
-Текущий текст:
-{old_text}
-
-Правка пользователя:
-{edit_request}
-
-Правила:
-- структура: Куплет → Припев → Куплет → Припев
-- припев должен повторяться одинаковым текстом
-- длина: 500–900 символов
-- НЕ пиши слова "Куплет" или "Припев"
-- используй только имя ребёнка: {data["name_stressed"]}
-- сохраняй ударение в имени
-- обязательно учитывай пол ребёнка и ставь правильные окончания
-- если ребёнок девочка, не используй мужские формы: уснул, смотрел, играл, маленький, добрый
-- если ребёнок мальчик, не используй женские формы: уснула, смотрела, играла, маленькая, добрая
-- текст должен легко петься
-- избегай сложных слов
-- сохрани мягкий формат колыбельной
-- без страшных образов
-- без плохих слов
-- без алкоголя, оружия, войны, насилия, смерти, наркотиков, взрослого контента
-- не пиши пояснения
-- верни только новый текст песни
-"""
-
-    response = OPENAI_CLIENT.responses.create(
-        model="gpt-5.2",
-        input=prompt
-    )
-
-    return response.output_text
-
-
-def polish_lullaby_text(data, text):
-    gender_context = get_gender_context(data)
-
-    prompt = f"""
-Проверь детскую колыбельную на русском языке.
-
-Данные:
-Имя ребёнка: {data["name_stressed"]}
-Пол ребёнка: {data["gender"]}
-Грамматический контекст пола: {gender_context}
-
-Задача:
-- исправь грамматические ошибки
-- исправь неестественные фразы
-- улучши фонетику для пения
-- упрости сложные слова
-- структура должна быть: Куплет → Припев → Куплет → Припев
-- припев должен повторяться одинаковым текстом
-- сохрани мягкий ритм колыбельной
-- сохрани имя ребёнка именно так: {data["name_stressed"]}
-- обязательно исправь окончания по полу ребёнка
-- если ребёнок девочка, не используй мужские формы: уснул, смотрел, играл, маленький, добрый
-- если ребёнок мальчик, не используй женские формы: уснула, смотрела, играла, маленькая, добрая
-- полностью убери или замени любые недетские темы: алкоголь, бар, оружие, война, насилие, страх, смерть, наркотики, взрослый контент
-- если встретились недетские темы, мягко замени их на безопасные детские образы: звёзды, луна, облака, сон, игрушки, мама, папа, зверята
-- не меняй смысл песни сильнее необходимого
-- не добавляй пояснения
-- верни только текст песни
-
-Текст:
-{text}
-"""
-
-    response = OPENAI_CLIENT.responses.create(
-        model="gpt-5.2",
-        input=prompt
-    )
-
-    return response.output_text
-
-
-def add_stress_marks_to_song(data, text):
-    gender_context = get_gender_context(data)
-
-    prompt = f"""
-Расставь ударения в тексте русской детской песни для музыкальной генерации Suno.
-
-Данные:
-Имя ребёнка: {data["name_stressed"]}
-Пол ребёнка: {data["gender"]}
-Грамматический контекст пола: {gender_context}
-
-Важно:
-- добавь знак ударения ́ после ударной гласной в каждом русском слове, где это возможно
-- имя ребёнка всегда пиши именно так: {data["name_stressed"]}
-- не меняй слова
-- не меняй строки
-- не меняй смысл
-- не меняй родовые окончания
-- не добавляй пояснения
-- не добавляй заголовки
-- верни только текст песни с ударениями
-
-Текст:
-{text}
-"""
-
-    response = OPENAI_CLIENT.responses.create(
-        model="gpt-5.2",
-        input=prompt
-    )
-
-    return response.output_text
-
-
-def safety_repair_and_note(data, text):
-    unsafe = find_unsafe_topics(text)
-
-    if not unsafe:
-        return text, ""
-
-    repaired = polish_lullaby_text(data, text)
-    return repaired, ""
-
-
-def prepare_final_lyrics(data, raw_text):
-    polished = polish_lullaby_text(data, raw_text)
-    repaired, note = safety_repair_and_note(data, polished)
-    stressed = add_stress_marks_to_song(data, repaired)
-
-    return stressed, note
-
-
-def generate_and_prepare_lullaby(data):
-    raw_text = generate_lullaby_text(data)
-    return prepare_final_lyrics(data, raw_text)
-
-
-def edit_and_prepare_lullaby(data, old_text, edit_request):
-    raw_new_text = edit_lullaby_text(data, old_text, edit_request)
-    return prepare_final_lyrics(data, raw_new_text)
-
-
-# =========================
-# SUNO
+# SUNO / ГЕНЕРАЦИЯ МУЗЫКИ
 # =========================
 
 def make_music_style(data):
     voice = data["voice"]
 
     if voice == "👩 Женский голос":
-        voice_style = "soft female vocal, warm motherly voice, gentle woman singer"
+        return "soft female lullaby, calm, warm, piano"
     elif voice == "👨 Мужской голос":
-        voice_style = (
-            "male vocal only, soft male singer, warm fatherly voice, "
-            "gentle low male voice, calm baritone lullaby, no female vocal, no woman voice"
-        )
+        return "soft male lullaby, calm, deep, gentle"
     else:
-        voice_style = (
-            "real child voice, very young kid singing, innocent child vocal, "
-            "soft childlike pronunciation, not adult female voice, not woman voice"
-        )
-
-    return (
-        f"Russian lullaby, {voice_style}, "
-        f"slow calm tempo, gentle melody, soft piano, soft strings, "
-        f"warm bedtime atmosphere, soothing, peaceful, tender"
-    )
+        return "child voice lullaby, soft, innocent"
 
 
 def create_music_task(lyrics, style, title):
@@ -840,8 +457,7 @@ def create_music_task(lyrics, style, title):
         "model": "V5_5",
         "prompt": lyrics,
         "style": style,
-        "title": title,
-        "callBackUrl": "https://example.com/callback"
+        "title": title
     }
 
     response = requests.post(
@@ -856,9 +472,7 @@ def create_music_task(lyrics, style, title):
 
 
 def get_music_audio_urls(task_id):
-    headers = {
-        "Authorization": f"Bearer {SUNO_API_KEY}"
-    }
+    headers = {"Authorization": f"Bearer {SUNO_API_KEY}"}
 
     response = requests.get(
         f"{SUNO_BASE_URL}/api/v1/generate/record-info",
@@ -877,47 +491,125 @@ def get_music_audio_urls(task_id):
     urls = []
 
     for song in songs:
-        audio_url = song.get("audioUrl")
-        stream_url = song.get("streamAudioUrl") or song.get("sourceStreamAudioUrl")
-
-        if audio_url:
-            urls.append(audio_url)
-        elif stream_url:
-            urls.append(stream_url)
+        if song.get("audioUrl"):
+            urls.append(song["audioUrl"])
 
     return urls
 
 
-def download_audio(audio_url, filename):
-    response = requests.get(audio_url, timeout=120)
+def download_audio(url, filename):
+    response = requests.get(url, timeout=120)
     response.raise_for_status()
 
     path = os.path.join(tempfile.gettempdir(), filename)
 
-    with open(path, "wb") as file:
-        file.write(response.content)
+    with open(path, "wb") as f:
+        f.write(response.content)
 
     return path
 
 
 # =========================
-# МЕНЮ
+# ГЕНЕРАЦИЯ МУЗЫКИ (🔥 ТВОЙ UX)
+# =========================
+
+async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    nuts = get_nuts(user_id)
+
+    if nuts < NUTS_PER_GENERATION:
+        await update.message.reply_text("🌰 Не хватает орешков")
+        return START
+
+    remove_nuts(user_id, NUTS_PER_GENERATION)
+
+    data = context.user_data
+    text = data["lullaby_text"]
+
+    await update.message.reply_text(
+        "🎵 Колыбелка напевает колыбельную...\n\n"
+        "Создаю музыку для сна 🌙"
+    )
+
+    try:
+        task_id = await asyncio.to_thread(
+            create_music_task,
+            text,
+            make_music_style(data),
+            "Колыбельная"
+        )
+
+        total_wait = 0
+        max_wait = 180  # 3 минуты
+        audio_urls = []
+
+        while total_wait < max_wait:
+            await asyncio.sleep(10)
+            total_wait += 10
+
+            audio_urls = await asyncio.to_thread(
+                get_music_audio_urls,
+                task_id
+            )
+
+            if audio_urls:
+                break
+
+            # 🔥 ПРОГРЕСС
+            if total_wait == 60:
+                await update.message.reply_text("⏳ Осталось примерно 2 минуты...")
+            elif total_wait == 120:
+                await update.message.reply_text("⏳ Осталась примерно 1 минута...")
+            else:
+                await update.message.reply_text("🎵 Колыбелка поёт...")
+
+        if not audio_urls:
+            add_nuts(user_id, NUTS_PER_GENERATION)
+
+            await update.message.reply_text(
+                "😔 Не удалось создать музыку.\n"
+                "🌰 Орешки возвращены."
+            )
+            return START
+
+        file_path = await asyncio.to_thread(
+            download_audio,
+            audio_urls[0],
+            "lullaby.mp3"
+        )
+
+        with open(file_path, "rb") as f:
+            await update.message.reply_document(f)
+
+        os.remove(file_path)
+
+        await update.message.reply_text("✨ Колыбельная готова!")
+
+        return START
+
+    except Exception as e:
+        print("Ошибка:", e)
+
+        add_nuts(user_id, NUTS_PER_GENERATION)
+
+        await update.message.reply_text(
+            "😔 Ошибка при создании музыки.\n"
+            "🌰 Орешки возвращены."
+        )
+
+        return START
+# =========================
+# МЕНЮ / СТАРТ
 # =========================
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     create_user_if_not_exists(update.effective_user)
 
     await update.message.reply_text(
-    f"🌙 Добро пожаловать в {BRAND_NAME}!\n\n"
-    f"Я создаю персональные музыкальные колыбельные для детей 💫\n\n"
-    f"🎵 В каждой песне:\n"
-    f"— имя ребёнка\n"
-    f"— любимые персонажи\n"
-    f"— нежный голос и спокойная музыка\n\n"
-    f"✨ Получается настоящая колыбельная, под которую ребёнок засыпает быстрее и спокойнее 🌙\n\n"
-    f"🌰 1 музыкальная колыбельная = {NUTS_PER_GENERATION} орешка\n\n"
-    f"💛 Давай создадим первую прямо сейчас:",
-    reply_markup=main_menu_keyboard()
+        f"🌙 Добро пожаловать в {BRAND_NAME}!\n\n"
+        f"Создаю персональные колыбельные 🎵\n\n"
+        f"1 колыбельная = {NUTS_PER_GENERATION} орешка 🌰🌰",
+        reply_markup=main_menu_keyboard()
     )
 
     return START
@@ -932,16 +624,14 @@ async def offer_buy_nuts(update: Update, user_id):
     nuts = get_nuts(user_id)
 
     await update.message.reply_text(
-        f"🐿️ {BRAND_NAME} сгрызла все орешки!\n\n"
-        f"🌰 Сейчас на балансе: {nuts} орешков\n"
-        f"🎵 Для одной музыкальной колыбельной нужно: {NUTS_PER_GENERATION} орешка\n\n"
-        f"Можно докупить орешки и сразу продолжить волшебство 🌙",
+        f"🌰 Баланс: {nuts}\n\n"
+        f"Нужно: {NUTS_PER_GENERATION}",
         reply_markup=buy_keyboard()
     )
 
 
 # =========================
-# СТАРТОВОЕ МЕНЮ / ЛИЧНЫЙ КАБИНЕТ
+# ОБРАБОТКА ГЛАВНОГО МЕНЮ
 # =========================
 
 async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -953,40 +643,30 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_restart(text):
         return await start(update, context)
 
-    if is_home(text) or is_back(text):
+    if is_home(text):
         return await show_main_menu(update, context)
 
     if text == "👤 Личный кабинет":
         nuts = get_nuts(user_id)
 
         await update.message.reply_text(
-            f"👤 Личный кабинет\n\n"
-            f"🌰 Твой баланс: {nuts} орешков\n\n"
-            f"🎵 1 музыкальная колыбельная = {NUTS_PER_GENERATION} орешка\n\n"
-            f"Здесь можно пополнить баланс или сразу создать новую колыбельную 🌙",
+            f"👤 Баланс: {nuts} 🌰",
             reply_markup=profile_keyboard()
         )
         return START
 
     if text == "🌰 Купить орешки":
         await update.message.reply_text(
-            "🌰 Выбери пакет орешков\n\n"
-            "Орешки нужны, чтобы создавать музыкальные колыбельные 🎵\n\n"
-            "Сейчас покупка работает в тестовом режиме.",
+            "Выбери пакет",
             reply_markup=buy_keyboard()
         )
         return START
 
     if text in NUT_PACKAGES:
-        amount = NUT_PACKAGES[text]
-        add_nuts(user_id, amount)
-        balance = get_nuts(user_id)
+        add_nuts(user_id, NUT_PACKAGES[text])
 
         await update.message.reply_text(
-            f"✅ Готово! {BRAND_NAME} получила новые орешки 🌰\n\n"
-            f"Начислено: {amount} орешков\n"
-            f"Текущий баланс: {balance} орешков\n\n"
-            f"Теперь можно создать музыкальную колыбельную 🌙🎵",
+            "Орешки начислены 🌰",
             reply_markup=profile_keyboard()
         )
         return START
@@ -1001,62 +681,29 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
 
         await update.message.reply_text(
-            "🌙 Давай создадим персональную колыбельную\n\n"
-            "Сначала напиши имя ребёнка.\n\n"
-            "✨ Важно: чтобы имя красиво звучало в песне, выдели ударную гласную БОЛЬШОЙ буквой.\n\n"
-            "Примеры:\n"
-            "МилАна\n"
-            "КИра\n"
-            "СофИя\n"
-            "МирОн\n"
-            "Ева\n"
-            "АлИса",
-            reply_markup=keyboard([])
+            "Напиши имя ребёнка"
         )
 
         return NAME_INPUT
 
-    await update.message.reply_text(
-        "🌙 Пожалуйста, выбери действие кнопкой ниже.",
-        reply_markup=main_menu_keyboard()
-    )
     return START
-
-
 # =========================
 # ИМЯ
 # =========================
 
 async def name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    name = update.message.text.strip()
 
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text) or is_home(text):
-        return await show_main_menu(update, context)
-
-    name = text.strip()
-    ok, message = validate_name(name)
-
+    ok, message = validate_common(name)
     if not ok:
-        await update.message.reply_text(message, reply_markup=keyboard([]))
+        await update.message.reply_text(message)
         return NAME_INPUT
 
-    plain_name, stressed_name, stress_error = make_stressed_name(name)
-
-    if stress_error:
-        await update.message.reply_text(stress_error, reply_markup=keyboard([]))
-        return NAME_INPUT
-
-    context.user_data["pending_name"] = plain_name
-    context.user_data["pending_name_stressed"] = stressed_name
+    context.user_data["name"] = name
+    context.user_data["name_stressed"] = name
 
     await update.message.reply_text(
-        f"✨ Отлично, я запомнила имя!\n\n"
-        f"👶 Имя ребёнка: {plain_name}\n"
-        f"🎵 С ударением для песни: {stressed_name}\n\n"
-        f"Так правильно?",
+        f"Имя: {name}\n\nВсё верно?",
         reply_markup=yes_change_keyboard()
     )
 
@@ -1066,37 +713,14 @@ async def name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def name_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text) or is_change(text):
-        await update.message.reply_text(
-            "🌙 Напиши имя ребёнка заново.\n\n"
-            "Ударную гласную выдели БОЛЬШОЙ буквой.\n\n"
-            "Примеры:\n"
-            "МилАна\n"
-            "АртЁм\n"
-            "СофИя\n"
-            "МирОн\n"
-            "Ева\n"
-            "АлИсА",
-            reply_markup=keyboard([])
-        )
+    if is_change(text):
+        await update.message.reply_text("Напиши имя заново")
         return NAME_INPUT
 
-    if not is_yes(text):
-        await update.message.reply_text(
-            "🌙 Нажми «✅ Всё верно» или «✏️ Изменить».",
-            reply_markup=yes_change_keyboard()
-        )
-        return NAME_CONFIRM
-
-    context.user_data["name"] = context.user_data["pending_name"]
-    context.user_data["name_stressed"] = context.user_data["pending_name_stressed"]
+    context.user_data["gender"] = None
 
     await update.message.reply_text(
-        "👶 Выбери пол ребёнка.\n\n"
-        "Это нужно, чтобы в песне были правильные окончания: уснул или уснула, маленький или маленькая.",
+        "Выбери пол",
         reply_markup=gender_keyboard()
     )
 
@@ -1104,43 +728,19 @@ async def name_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# ПОЛ РЕБЁНКА
+# ПОЛ
 # =========================
 
 async def gender_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text):
-        await update.message.reply_text(
-            "🌙 Вернёмся к имени.\n\n"
-            "Напиши имя ребёнка и выдели ударную гласную БОЛЬШОЙ буквой.\n\n"
-            "Например: МилАна",
-            reply_markup=keyboard([])
-        )
-        return NAME_INPUT
-
-    allowed = ["👧 Девочка", "👦 Мальчик"]
-
-    if text not in allowed:
-        await update.message.reply_text(
-            "👶 Пожалуйста, выбери пол ребёнка кнопкой.",
-            reply_markup=gender_keyboard()
-        )
+    if text not in ["👧 Девочка", "👦 Мальчик"]:
+        await update.message.reply_text("Выбери кнопкой")
         return GENDER_INPUT
 
     context.user_data["gender"] = text
 
-    await update.message.reply_text(
-        "🎂 Теперь напиши возраст ребёнка.\n\n"
-        "Примеры:\n"
-        "2 — если ребёнку 2 года\n"
-        "3,5 — если 3 года 5 месяцев\n"
-        "3,10 — если 3 года 10 месяцев",
-        reply_markup=keyboard([])
-    )
+    await update.message.reply_text("Напиши возраст")
 
     return AGE_INPUT
 
@@ -1150,34 +750,19 @@ async def gender_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 async def age_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    age = update.message.text
 
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text):
-        await update.message.reply_text(
-            "👶 Вернёмся к выбору пола ребёнка.",
-            reply_markup=gender_keyboard()
-        )
-        return GENDER_INPUT
-
-    age = text.strip()
     ok, message = validate_age(age)
-
     if not ok:
-        await update.message.reply_text(message, reply_markup=keyboard([]))
+        await update.message.reply_text(message)
         return AGE_INPUT
 
     parsed = parse_age(age)
 
-    context.user_data["pending_age"] = parsed["display"]
-    context.user_data["pending_age_years"] = parsed["years"]
-    context.user_data["pending_age_months"] = parsed["months"]
+    context.user_data["age"] = parsed["display"]
 
     await update.message.reply_text(
-        f"🎂 Возраст ребёнка: {parsed['display']}\n\n"
-        "Всё верно?",
+        f"Возраст: {parsed['display']}\n\nВсё верно?",
         reply_markup=yes_change_keyboard()
     )
 
@@ -1187,37 +772,12 @@ async def age_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def age_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text) or is_change(text):
-        await update.message.reply_text(
-            "🎂 Напиши возраст ребёнка заново.\n\n"
-            "Например: 3,5",
-            reply_markup=keyboard([])
-        )
+    if is_change(text):
+        await update.message.reply_text("Напиши возраст заново")
         return AGE_INPUT
 
-    if not is_yes(text):
-        await update.message.reply_text(
-            "🌙 Нажми «✅ Всё верно» или «✏️ Изменить».",
-            reply_markup=yes_change_keyboard()
-        )
-        return AGE_CONFIRM
-
-    context.user_data["age"] = context.user_data["pending_age"]
-    context.user_data["age_years"] = context.user_data["pending_age_years"]
-    context.user_data["age_months"] = context.user_data["pending_age_months"]
-
     await update.message.reply_text(
-        "🧸 Кого добавить в колыбельную?\n\n"
-        "Это могут быть любимые герои, игрушки или близкие люди.\n\n"
-        "Например:\n"
-        "мама, папа, мишка, зайка, Синий трактор\n\n"
-        "Если хочешь песню без персонажей — нажми кнопку ниже.",
-        reply_markup=keyboard([
-            ["🧸 Без персонажей"]
-        ])
+        "Кого добавить в песню?",
     )
 
     return CHAR_INPUT
@@ -1230,39 +790,15 @@ async def age_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def char_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text):
-        await update.message.reply_text(
-            "🎂 Вернёмся к возрасту ребёнка.\n\n"
-            "Напиши возраст числом. Например: 3,5",
-            reply_markup=keyboard([])
-        )
-        return AGE_INPUT
-
-    if text in ["🧸 Без персонажей", "без персонажей"]:
-        characters = "без персонажей"
-    else:
-        characters = text.strip()
-
-    ok, message = validate_common(characters)
-
+    ok, message = validate_common(text)
     if not ok:
-        await update.message.reply_text(message, reply_markup=keyboard([["🧸 Без персонажей"]]))
+        await update.message.reply_text(message)
         return CHAR_INPUT
 
-    safe_ok, safe_message = validate_child_safe_text(characters)
-
-    if not safe_ok:
-        await update.message.reply_text(safe_message, reply_markup=keyboard([["🧸 Без персонажей"]]))
-        return CHAR_INPUT
-
-    context.user_data["pending_characters"] = characters
+    context.user_data["characters"] = text
 
     await update.message.reply_text(
-        f"🧸 Персонажи и образы:\n{characters}\n\n"
-        "Всё верно?",
+        f"Персонажи: {text}\n\nВсё верно?",
         reply_markup=yes_change_keyboard()
     )
 
@@ -1272,29 +808,12 @@ async def char_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def char_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text) or is_change(text):
-        await update.message.reply_text(
-            "🧸 Напиши персонажей заново или нажми «🧸 Без персонажей».",
-            reply_markup=keyboard([
-                ["🧸 Без персонажей"]
-            ])
-        )
+    if is_change(text):
+        await update.message.reply_text("Напиши заново")
         return CHAR_INPUT
 
-    if not is_yes(text):
-        await update.message.reply_text(
-            "🌙 Нажми «✅ Всё верно» или «✏️ Изменить».",
-            reply_markup=yes_change_keyboard()
-        )
-        return CHAR_CONFIRM
-
-    context.user_data["characters"] = context.user_data["pending_characters"]
-
     await update.message.reply_text(
-        "🎤 Выбери голос будущей музыкальной колыбельной:",
+        "Выбери голос",
         reply_markup=keyboard([
             ["👩 Женский голос"],
             ["👨 Мужской голос"],
@@ -1303,103 +822,34 @@ async def char_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     return VOICE
-
-
 # =========================
-# ГОЛОС
+# НАСТРОЕНИЕ
 # =========================
 
 async def voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text):
-        await update.message.reply_text(
-            "🧸 Вернёмся к персонажам.\n\n"
-            "Напиши персонажей заново или нажми «🧸 Без персонажей».",
-            reply_markup=keyboard([
-                ["🧸 Без персонажей"]
-            ])
-        )
-        return CHAR_INPUT
-
-    allowed = ["👩 Женский голос", "👨 Мужской голос", "🧒 Детский голос"]
-
-    if text not in allowed:
-        await update.message.reply_text(
-            "🎤 Пожалуйста, выбери голос кнопкой.",
-            reply_markup=keyboard([
-                ["👩 Женский голос"],
-                ["👨 Мужской голос"],
-                ["🧒 Детский голос"]
-            ])
-        )
-        return VOICE
-
-    context.user_data["voice"] = text
+    context.user_data["voice"] = update.message.text
 
     await update.message.reply_text(
-        "✨ Какое настроение сделать у колыбельной?",
+        "Выбери настроение",
         reply_markup=keyboard([
             ["💗 Очень нежная"],
             ["🌟 Волшебная"],
             ["🌙 Спокойная"],
-            ["🧚 Добрая сказочная"]
         ])
     )
 
     return MOOD
 
 
-# =========================
-# НАСТРОЕНИЕ
-# =========================
-
 async def mood_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text):
-        await update.message.reply_text(
-            "🎤 Вернёмся к выбору голоса:",
-            reply_markup=keyboard([
-                ["👩 Женский голос"],
-                ["👨 Мужской голос"],
-                ["🧒 Детский голос"]
-            ])
-        )
-        return VOICE
-
-    allowed = ["💗 Очень нежная", "🌟 Волшебная", "🌙 Спокойная", "🧚 Добрая сказочная"]
-
-    if text not in allowed:
-        await update.message.reply_text(
-            "✨ Пожалуйста, выбери настроение кнопкой.",
-            reply_markup=keyboard([
-                ["💗 Очень нежная"],
-                ["🌟 Волшебная"],
-                ["🌙 Спокойная"],
-                ["🧚 Добрая сказочная"]
-            ])
-        )
-        return MOOD
-
-    context.user_data["mood"] = text
+    context.user_data["mood"] = update.message.text
 
     await update.message.reply_text(
-        "🌌 Выбери тему колыбельной:",
+        "Выбери тему",
         reply_markup=keyboard([
-            ["🌙 Звёзды и луна"],
-            ["🌲 Лес и зверята"],
-            ["☁️ Море и облака"],
-            ["🧸 Игрушки засыпают"],
-            ["🤍 Мама рядом"],
-            ["💙 Папа рядом"],
-            ["🌈 Свой вариант"]
+            ["🌙 Звёзды"],
+            ["🌲 Лес"],
+            ["☁️ Облака"],
         ])
     )
 
@@ -1411,491 +861,90 @@ async def mood_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 async def theme_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text):
-        await update.message.reply_text(
-            "✨ Вернёмся к настроению колыбельной:",
-            reply_markup=keyboard([
-                ["💗 Очень нежная"],
-                ["🌟 Волшебная"],
-                ["🌙 Спокойная"],
-                ["🧚 Добрая сказочная"]
-            ])
-        )
-        return MOOD
-
-    allowed = [
-        "🌙 Звёзды и луна",
-        "🌲 Лес и зверята",
-        "☁️ Море и облака",
-        "🧸 Игрушки засыпают",
-        "🤍 Мама рядом",
-        "💙 Папа рядом",
-        "🌈 Свой вариант"
-    ]
-
-    if text not in allowed:
-        await update.message.reply_text(
-            "🌌 Пожалуйста, выбери тему кнопкой.",
-            reply_markup=keyboard([
-                ["🌙 Звёзды и луна"],
-                ["🌲 Лес и зверята"],
-                ["☁️ Море и облака"],
-                ["🧸 Игрушки засыпают"],
-                ["🤍 Мама рядом"],
-                ["💙 Папа рядом"],
-                ["🌈 Свой вариант"]
-            ])
-        )
-        return THEME
-
-    if text == "🌈 Свой вариант":
-        await update.message.reply_text(
-            "🌈 Напиши свою тему колыбельной.\n\n"
-            "Тема должна быть мягкой, детской и спокойной.\n\n"
-            "✨ Примеры:\n"
-            "про космос и маленького робота\n"
-            "про домик у озера\n"
-            "про плюшевого мишку и звёзды",
-            reply_markup=keyboard([])
-        )
-        return THEME_CUSTOM
-
-    context.user_data["theme"] = text
-    return await show_final_summary(update, context)
-
-
-async def theme_custom_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text):
-        await update.message.reply_text(
-            "🌌 Вернёмся к выбору темы:",
-            reply_markup=keyboard([
-                ["🌙 Звёзды и луна"],
-                ["🌲 Лес и зверята"],
-                ["☁️ Море и облака"],
-                ["🧸 Игрушки засыпают"],
-                ["🤍 Мама рядом"],
-                ["💙 Папа рядом"],
-                ["🌈 Свой вариант"]
-            ])
-        )
-        return THEME
-
-    ok, message = validate_common(text)
-
-    if not ok:
-        await update.message.reply_text(message, reply_markup=keyboard([]))
-        return THEME_CUSTOM
-
-    safe_ok, safe_message = validate_child_safe_text(text)
-
-    if not safe_ok:
-        await update.message.reply_text(safe_message, reply_markup=keyboard([]))
-        return THEME_CUSTOM
-
-    if len(text) > 100:
-        await update.message.reply_text(
-            "✨ Тема получилась длинной. Напиши чуть короче, чтобы песня была лёгкой.",
-            reply_markup=keyboard([])
-        )
-        return THEME_CUSTOM
-
-    context.user_data["theme"] = text
-    return await show_final_summary(update, context)
-
-
-# =========================
-# ФИНАЛЬНАЯ ПРОВЕРКА
-# =========================
-
-async def show_final_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = context.user_data
-
-    summary = f"""
-🌙 Почти готово! Проверь данные:
-
-👶 Имя: {data["name"]}
-🎵 Имя с ударением: {data["name_stressed"]}
-👶 Пол: {data["gender"]}
-🎂 Возраст: {data["age"]}
-🧸 Персонажи: {data["characters"]}
-🎤 Голос: {data["voice"]}
-✨ Настроение: {data["mood"]}
-🌌 Тема: {data["theme"]}
-
-Создаём текст колыбельной?
-"""
+    context.user_data["theme"] = update.message.text
 
     await update.message.reply_text(
-        summary,
-        reply_markup=keyboard([
-            ["✨ Создать текст"],
-            ["✏️ Изменить данные"]
-        ])
-    )
-
-    return FINAL_CONFIRM
-
-
-async def final_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text) or text in ["✏️ Изменить данные", "Изменить данные"]:
-        await update.message.reply_text(
-            "🌌 Хорошо, вернёмся к теме колыбельной:",
-            reply_markup=keyboard([
-                ["🌙 Звёзды и луна"],
-                ["🌲 Лес и зверята"],
-                ["☁️ Море и облака"],
-                ["🧸 Игрушки засыпают"],
-                ["🤍 Мама рядом"],
-                ["💙 Папа рядом"],
-                ["🌈 Свой вариант"]
-            ])
-        )
-        return THEME
-
-    if text not in ["✨ Создать текст", "Создать текст"]:
-        await update.message.reply_text(
-            "🌙 Нажми «✨ Создать текст» или «✏️ Изменить данные».",
-            reply_markup=keyboard([
-                ["✨ Создать текст"],
-                ["✏️ Изменить данные"]
-            ])
-        )
-        return FINAL_CONFIRM
-
-    await update.message.reply_text(
-        f"✨ {BRAND_NAME} сочиняет колыбельную и расставляет правильные ударения 🌙",
+        "✨ Создаю текст...",
         reply_markup=generation_wait_keyboard()
     )
 
-    try:
-        lullaby_text, safety_note = await run_with_wait_messages(
-            update,
-            generate_and_prepare_lullaby,
-            context.user_data,
-            wait_messages=CREATE_TEXT_WAIT_MESSAGES
-        )
+    lullaby_text = await run_with_wait_messages(
+        update,
+        generate_and_prepare_lullaby,
+        context.user_data
+    )
 
-        context.user_data["lullaby_text"] = lullaby_text
-        context.user_data["edit_count"] = 0
+    context.user_data["lullaby_text"] = lullaby_text
+    context.user_data["edit_count"] = 0
 
-        await update.message.reply_text("🌙 Текст колыбельной готов:")
-        await send_long_text(update, lullaby_text)
+    await send_long_text(update, lullaby_text)
 
-        await update.message.reply_text(
-            "✨ Текст тебе нравится?",
-            reply_markup=text_review_keyboard()
-        )
+    await update.message.reply_text(
+        "Текст подходит?",
+        reply_markup=text_review_keyboard()
+    )
 
-        return LULLABY_REVIEW
-
-    except Exception as error:
-        print("Ошибка OpenAI:", error)
-        await update.message.reply_text(
-            "😔 Не получилось создать текст колыбельной.\n\n"
-            "Иногда сервис отвечает слишком долго. Можно попробовать ещё раз или начать заново.",
-            reply_markup=keyboard([
-                ["✨ Создать текст"],
-                ["✏️ Изменить данные"]
-            ])
-        )
-        return FINAL_CONFIRM
+    return LULLABY_REVIEW
 
 
 # =========================
-# ПРОВЕРКА / РЕДАКТИРОВАНИЕ ТЕКСТА
+# РЕДАКТИРОВАНИЕ
 # =========================
 
 async def lullaby_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text):
-        return await show_final_summary(update, context)
-
-    if text in ["✅ Подтвердить", "Подтвердить"]:
+    if text == "✅ Подтвердить":
         return await generate_music(update, context)
 
-    if text in ["✏️ Редактировать", "Редактировать"]:
-        edit_count = context.user_data.get("edit_count", 0)
+    if text == "✏️ Редактировать":
+        edits = context.user_data.get("edit_count", 0)
 
-        if edit_count >= MAX_EDITS:
+        if edits >= MAX_EDITS:
             await update.message.reply_text(
-                "🌙 Лимит правок уже использован.\n\n"
-                "Теперь можно создать музыкальную версию из текущего текста 🎵",
+                "Лимит правок достигнут",
                 reply_markup=create_music_keyboard()
             )
             return GENERATE_MUSIC
 
-        left = MAX_EDITS - edit_count
-
-        await update.message.reply_text(
-            f"✏️ Напиши, что изменить в тексте.\n\n"
-            f"Примеры:\n"
-            f"«Сделай припев нежнее»\n"
-            f"«Добавь больше звёзд и луны»\n"
-            f"«Убери мишку из второго куплета»\n\n"
-            f"Осталось правок: {left}",
-            reply_markup=keyboard([])
-        )
-
+        await update.message.reply_text("Напиши правку")
         return EDIT_REQUEST
 
-    await update.message.reply_text(
-        "🌙 Нажми «✅ Подтвердить» или «✏️ Редактировать».",
-        reply_markup=text_review_keyboard()
-    )
     return LULLABY_REVIEW
 
 
 async def edit_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+    edit_text = update.message.text
 
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text):
-        await update.message.reply_text(
-            "✨ Текст тебе нравится?",
-            reply_markup=text_review_keyboard()
-        )
-        return LULLABY_REVIEW
-
-    ok, message = validate_common(text)
-
-    if not ok:
-        await update.message.reply_text(message, reply_markup=keyboard([]))
-        return EDIT_REQUEST
-
-    safe_ok, safe_message = validate_child_safe_text(text)
-
-    if not safe_ok:
-        await update.message.reply_text(safe_message, reply_markup=keyboard([]))
-        return EDIT_REQUEST
-
-    edit_count = context.user_data.get("edit_count", 0)
-
-    if edit_count >= MAX_EDITS:
-        await update.message.reply_text(
-            "🌙 Лимит правок уже использован.\n\n"
-            "Теперь можно создать музыкальную колыбельную 🎵",
-            reply_markup=create_music_keyboard()
-        )
-        return GENERATE_MUSIC
-
-    await update.message.reply_text(
-        f"✨ {BRAND_NAME} аккуратно вносит правки...\n\n"
-        f"Сохраняю нежность, ритм и правильные ударения 🌙",
-        reply_markup=generation_wait_keyboard()
+    new_text = await run_with_wait_messages(
+        update,
+        edit_and_prepare_lullaby,
+        context.user_data,
+        context.user_data["lullaby_text"],
+        edit_text,
+        wait_messages=EDIT_TEXT_WAIT_MESSAGES
     )
 
-    try:
-        new_text, safety_note = await run_with_wait_messages(
-            update,
-            edit_and_prepare_lullaby,
-            context.user_data,
-            context.user_data["lullaby_text"],
-            text,
-            wait_messages=EDIT_TEXT_WAIT_MESSAGES
-        )
+    context.user_data["lullaby_text"] = new_text
+    context.user_data["edit_count"] += 1
 
-        context.user_data["lullaby_text"] = new_text
-        context.user_data["edit_count"] = edit_count + 1
-
-        await update.message.reply_text("🌙 Обновлённый текст:")
-        await send_long_text(update, new_text)
-
-        if context.user_data["edit_count"] >= MAX_EDITS:
-            await update.message.reply_text(
-                "✨ Лимит правок использован.\n\n"
-                "Теперь можно создать музыкальную колыбельную 🎵",
-                reply_markup=create_music_keyboard()
-            )
-            return GENERATE_MUSIC
-
-        left = MAX_EDITS - context.user_data["edit_count"]
-
-        await update.message.reply_text(
-            f"✨ Теперь текст подходит?\n\n"
-            f"Осталось правок: {left}",
-            reply_markup=text_review_keyboard()
-        )
-
-        return LULLABY_REVIEW
-
-    except Exception as error:
-        print("Ошибка OpenAI:", error)
-        await update.message.reply_text(
-            "😔 Не получилось изменить текст.\n\n"
-            "Попробуй написать правку чуть проще.",
-            reply_markup=keyboard([])
-        )
-        return EDIT_REQUEST
-
-
-# =========================
-# СОЗДАНИЕ МУЗЫКИ
-# =========================
-
-async def generate_music_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-
-    if is_restart(text):
-        return await start(update, context)
-
-    if is_back(text):
-        await update.message.reply_text(
-            "✨ Текст тебе нравится?",
-            reply_markup=text_review_keyboard()
-        )
-        return LULLABY_REVIEW
-
-    if text not in ["🎵 Создать музыку", "Создать музыку"]:
-        await update.message.reply_text(
-            "🎵 Нажми кнопку «🎵 Создать музыку».",
-            reply_markup=create_music_keyboard()
-        )
-        return GENERATE_MUSIC
-
-    return await generate_music(update, context)
-
-
-async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    nuts = get_nuts(user_id)
-
-    if nuts < NUTS_PER_GENERATION:
-        await offer_buy_nuts(update, user_id)
-        return START
-
-    remove_nuts(user_id, NUTS_PER_GENERATION)
-
-    data = context.user_data
-    lullaby_text = data["lullaby_text"]
+    await send_long_text(update, new_text)
 
     await update.message.reply_text(
-        f"🎵 {BRAND_NAME} создаёт музыкальную колыбельную...\n\n"
-        f"Сейчас текст превратится в нежную песню для сна 🌙",
-        reply_markup=generation_wait_keyboard()
+        "Теперь подходит?",
+        reply_markup=text_review_keyboard()
     )
 
-    try:
-        genitive_name = make_genitive_name(data["name"])
-        title = f"Колыбельная для {genitive_name}"
-        style = make_music_style(data)
-
-        task_id = await asyncio.to_thread(create_music_task, lullaby_text, style, title)
-
-        audio_urls = []
-
-        for attempt in range(30):
-            await asyncio.sleep(10)
-            audio_urls = await asyncio.to_thread(get_music_audio_urls, task_id)
-
-            if audio_urls:
-                break
-
-            if attempt == 6:
-                await update.message.reply_text(
-                    "⏳ Музыка ещё создаётся... Уже скоро будет волшебство 🌙",
-                    reply_markup=generation_wait_keyboard()
-                )
-
-            if attempt == 14:
-                await update.message.reply_text(
-                    "🎵 Почти готово. Собираю музыкальную колыбельную...",
-                    reply_markup=generation_wait_keyboard()
-                )
-
-        if not audio_urls:
-            add_nuts(user_id, NUTS_PER_GENERATION)
-
-            await update.message.reply_text(
-                "😔 Музыкальная колыбельная пока не готова.\n\n"
-                "🌰 Орешки вернулись на баланс.\n\n"
-                "Можно попробовать создать музыку позже или зайти в личный кабинет.",
-                reply_markup=main_menu_keyboard()
-            )
-            return START
-
-        safe_title = clean_filename(title)
-        audio_url = audio_urls[0]
-
-        await update.message.reply_text(
-            "✨ Готово! Колыбельная создана 🎵",
-            reply_markup=generation_wait_keyboard()
-        )
-
-        filename = f"{safe_title}.mp3"
-        file_path = await asyncio.to_thread(download_audio, audio_url, filename)
-
-        with open(file_path, "rb") as audio_file:
-            await update.message.reply_document(
-                document=audio_file,
-                filename=filename,
-                caption=f"🌙 {title}",
-                read_timeout=180,
-                write_timeout=180,
-                connect_timeout=60,
-                pool_timeout=180
-            )
-
-        os.remove(file_path)
-
-        balance = get_nuts(user_id)
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            f"🌙 Всё готово!\n\n"
-            f"Спасибо, что создали колыбельную в {BRAND_NAME} ✨\n\n"
-            f"🌰 Баланс: {balance} орешков\n\n"
-            f"Можно создать новую колыбельную или зайти в личный кабинет.",
-            reply_markup=main_menu_keyboard()
-        )
-
-        return START
-
-    except Exception as error:
-        print("Ошибка Suno/музыки:", error)
-
-        add_nuts(user_id, NUTS_PER_GENERATION)
-
-        await update.message.reply_text(
-            "😔 Не получилось создать музыкальную колыбельную.\n\n"
-            "🌰 Орешки вернулись на баланс.\n\n"
-            "Можно попробовать позже или зайти в личный кабинет.",
-            reply_markup=main_menu_keyboard()
-        )
-        return START
-
-
+    return LULLABY_REVIEW
 # =========================
-# ОТМЕНА / ЗАПУСК
+# ЗАПУСК
 # =========================
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
 
     await update.message.reply_text(
-        "🌙 Создание колыбельной отменено.\n\n"
-        "Чтобы начать заново, нажми кнопку ниже.",
+        "Отменено",
         reply_markup=main_menu_keyboard()
     )
 
@@ -1903,69 +952,49 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    print("⚠️ Ошибка Telegram/сети:", context.error)
+    print("Ошибка:", context.error)
 
 
 def main():
     init_db()
 
-    if not TELEGRAM_TOKEN:
-        print("Ошибка: TELEGRAM_TOKEN не найден")
-        return
-
-    if not OPENAI_API_KEY:
-        print("Ошибка: OPENAI_API_KEY не найден")
-        return
-
-    if not SUNO_API_KEY:
-        print("Ошибка: SUNO_API_KEY не найден")
-        return
-
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
-        .connect_timeout(60)
-        .read_timeout(180)
-        .write_timeout(180)
-        .pool_timeout(180)
         .build()
     )
 
     conversation = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
-            MessageHandler(filters.Regex("^🔄 Начать заново$"), start),
-            MessageHandler(filters.Regex("^🔄 Начать сначала$"), start),
-            MessageHandler(filters.Regex("^Начать заново$"), start),
-            MessageHandler(filters.Regex("^Начать сначала$"), start),
         ],
         states={
-            START: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_button)],
-            NAME_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_input)],
-            NAME_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_confirm)],
-            GENDER_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, gender_input)],
-            AGE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, age_input)],
-            AGE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, age_confirm)],
-            CHAR_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, char_input)],
-            CHAR_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, char_confirm)],
-            VOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, voice_choice)],
-            MOOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, mood_choice)],
-            THEME: [MessageHandler(filters.TEXT & ~filters.COMMAND, theme_choice)],
-            THEME_CUSTOM: [MessageHandler(filters.TEXT & ~filters.COMMAND, theme_custom_input)],
-            FINAL_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, final_confirm)],
-            LULLABY_REVIEW: [MessageHandler(filters.TEXT & ~filters.COMMAND, lullaby_review)],
-            EDIT_REQUEST: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_request)],
-            GENERATE_MUSIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, generate_music_button)],
+            START: [MessageHandler(filters.TEXT, start_button)],
+
+            NAME_INPUT: [MessageHandler(filters.TEXT, name_input)],
+            NAME_CONFIRM: [MessageHandler(filters.TEXT, name_confirm)],
+
+            GENDER_INPUT: [MessageHandler(filters.TEXT, gender_input)],
+
+            AGE_INPUT: [MessageHandler(filters.TEXT, age_input)],
+            AGE_CONFIRM: [MessageHandler(filters.TEXT, age_confirm)],
+
+            CHAR_INPUT: [MessageHandler(filters.TEXT, char_input)],
+            CHAR_CONFIRM: [MessageHandler(filters.TEXT, char_confirm)],
+
+            VOICE: [MessageHandler(filters.TEXT, voice_choice)],
+            MOOD: [MessageHandler(filters.TEXT, mood_choice)],
+
+            THEME: [MessageHandler(filters.TEXT, theme_choice)],
+
+            LULLABY_REVIEW: [MessageHandler(filters.TEXT, lullaby_review)],
+            EDIT_REQUEST: [MessageHandler(filters.TEXT, edit_request)],
+
+            GENERATE_MUSIC: [MessageHandler(filters.TEXT, generate_music)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
-            CommandHandler("start", start),
-            MessageHandler(filters.Regex("^🔄 Начать заново$"), start),
-            MessageHandler(filters.Regex("^🔄 Начать сначала$"), start),
-            MessageHandler(filters.Regex("^Начать заново$"), start),
-            MessageHandler(filters.Regex("^Начать сначала$"), start),
         ],
-        allow_reentry=True,
     )
 
     app.add_handler(conversation)
