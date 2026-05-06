@@ -1,6 +1,5 @@
 import os
 import re
-import time
 import sqlite3
 import asyncio
 import tempfile
@@ -29,13 +28,10 @@ SUNO_API_KEY = os.getenv("SUNO_API_KEY")
 OPENAI_CLIENT = OpenAI(api_key=OPENAI_API_KEY)
 SUNO_BASE_URL = "https://api.sunoapi.org"
 
-DB_PATH = os.getenv("DB_PATH", "kolybelka.db")
+DB_PATH = "kolybelka.db"
 
-MAX_EDITS = 3
+MAX_EDITS = 5
 NUTS_PER_GENERATION = 2
-
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.2")
-SUNO_MODEL = os.getenv("SUNO_MODEL", "V5_5")
 
 NUT_PACKAGES = {
     "🌰 Купить 3 орешка": 3,
@@ -62,6 +58,7 @@ NUT_PACKAGES = {
     GENERATE_MUSIC,
 ) = range(16)
 
+
 BAD_WORDS = [
     "дурак", "дура", "идиот", "идиотка", "тупой", "тупая",
     "блять", "блядь", "сука", "хуй", "пизда", "ебать",
@@ -80,9 +77,6 @@ UNSAFE_CHILD_TOPICS = [
 
 RUSSIAN_VOWELS_UPPER = "АЕЁИОУЫЭЮЯ"
 STRESS_MARK = "\u0301"
-
-# Защита от двойной генерации музыки одним пользователем
-USER_MUSIC_LOCKS = set()
 
 
 # =========================
@@ -165,38 +159,15 @@ def create_music_keyboard():
 # БАЗА ДАННЫХ
 # =========================
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    return conn
-
-
 def init_db():
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            nuts INTEGER DEFAULT 0,
-            created_at INTEGER DEFAULT (strftime('%s','now')),
-            updated_at INTEGER DEFAULT (strftime('%s','now'))
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS generations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            child_name TEXT,
-            title TEXT,
-            lyrics TEXT,
-            status TEXT DEFAULT 'created',
-            task_id TEXT,
-            audio_url TEXT,
-            created_at INTEGER DEFAULT (strftime('%s','now'))
+            nuts INTEGER DEFAULT 0
         )
     """)
 
@@ -205,15 +176,12 @@ def init_db():
 
 
 def create_user_if_not_exists(user):
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
     cur.execute("""
-        INSERT INTO users (user_id, username, nuts)
+        INSERT OR IGNORE INTO users (user_id, username, nuts)
         VALUES (?, ?, 0)
-        ON CONFLICT(user_id) DO UPDATE SET
-            username = excluded.username,
-            updated_at = strftime('%s','now')
     """, (user.id, user.username))
 
     conn.commit()
@@ -221,23 +189,24 @@ def create_user_if_not_exists(user):
 
 
 def get_nuts(user_id):
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
     cur.execute("SELECT nuts FROM users WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
 
     conn.close()
+
     return row[0] if row else 0
 
 
 def add_nuts(user_id, amount):
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
     cur.execute("""
         UPDATE users
-        SET nuts = nuts + ?, updated_at = strftime('%s','now')
+        SET nuts = nuts + ?
         WHERE user_id = ?
     """, (amount, user_id))
 
@@ -245,47 +214,18 @@ def add_nuts(user_id, amount):
     conn.close()
 
 
-def remove_nuts_safe(user_id, amount):
-    """
-    Атомарно списывает орешки.
-    Возвращает True, если списание реально произошло.
-    """
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    try:
-        cur.execute("BEGIN IMMEDIATE")
-        cur.execute("""
-            UPDATE users
-            SET nuts = nuts - ?, updated_at = strftime('%s','now')
-            WHERE user_id = ? AND nuts >= ?
-        """, (amount, user_id, amount))
-
-        success = cur.rowcount > 0
-        conn.commit()
-        return success
-
-    except Exception:
-        conn.rollback()
-        raise
-
-    finally:
-        conn.close()
-
-
-def save_generation(user_id, child_name, title, lyrics, status="created", task_id=None, audio_url=None):
-    conn = get_db_connection()
+def remove_nuts(user_id, amount):
+    conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
     cur.execute("""
-        INSERT INTO generations (user_id, child_name, title, lyrics, status, task_id, audio_url)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, child_name, title, lyrics, status, task_id, audio_url))
+        UPDATE users
+        SET nuts = nuts - ?
+        WHERE user_id = ? AND nuts >= ?
+    """, (amount, user_id, amount))
 
-    generation_id = cur.lastrowid
     conn.commit()
     conn.close()
-    return generation_id
 
 
 # =========================
@@ -503,7 +443,7 @@ def validate_name(name):
     if not re.fullmatch(r"[А-Яа-яЁёA-Za-z\- ]+", name.strip()):
         return False, "🌙 В имени можно использовать только буквы."
 
-    _, _, stress_error = make_stressed_name(name)
+    plain_name, stressed_name, stress_error = make_stressed_name(name)
 
     if stress_error:
         return False, stress_error
@@ -575,21 +515,17 @@ async def send_long_text(update: Update, text: str):
 
 
 CREATE_TEXT_WAIT_MESSAGES = [
-    (10, "🐿️ Колыбелка напевает первые строчки... хрум-хрум 🌙"),
-    (20, "🌙 Белочка всё ещё сочиняет, получается очень нежно ✨"),
-    (30, "🐿️ Ещё немного... Колыбелка подбирает мягкие слова 🌰"),
-    (40, "✨ Проверяю ритм, чтобы песенка звучала плавно 🎵"),
-    (50, "🌙 Почти готово... осталось чуть-чуть волшебства"),
-    (60, "🐿️ Колыбелка допевает последние строчки... хрум-хрум ✨"),
+    (5, "🐿️ Колыбелка подбирает самые нежные слова 🌙"),
+    (10, "✨ Песенка уже складывается в мягкий ритм 🎵"),
+    (15, "🌙 Почти готово... проверяю, чтобы всё звучало красиво"),
+    (20, "🐿️ Колыбелка чуть задумалась, сейчас всё аккуратно допоёт ✨"),
 ]
 
 EDIT_TEXT_WAIT_MESSAGES = [
-    (10, "✏️ Колыбелка аккуратно вносит правки... хрум-хрум 🌙"),
-    (20, "✨ Подправляю строки, чтобы песня звучала мягче 🎵"),
-    (30, "🌙 Проверяю новые слова и правильные окончания"),
-    (40, "🐿️ Белочка перечитывает текст, чтобы всё было красиво ✨"),
-    (50, "🌰 Ещё немного... Колыбелка бережёт нежный ритм"),
-    (60, "✨ Почти готово, допеваю обновлённую версию 🌙"),
+    (5, "✏️ Колыбелка уже вносит правки и бережёт нежный ритм 🌙"),
+    (10, "✨ Ещё немного... подправляю строки, чтобы песня звучала мягче 🎵"),
+    (15, "🌙 Почти готово... проверяю новые слова и окончания"),
+    (20, "🐿️ Колыбелка внимательно перечитывает текст, чтобы всё было красиво ✨"),
 ]
 
 
@@ -619,24 +555,6 @@ async def run_with_wait_messages(update: Update, func, *args, wait_messages=None
 # =========================
 # OPENAI
 # =========================
-
-def openai_text_response(prompt, retries=3):
-    last_error = None
-
-    for attempt in range(retries):
-        try:
-            response = OPENAI_CLIENT.responses.create(
-                model=OPENAI_MODEL,
-                input=prompt,
-            )
-            return response.output_text.strip()
-        except Exception as error:
-            last_error = error
-            if attempt < retries - 1:
-                time.sleep(2 + attempt * 2)
-
-    raise last_error
-
 
 def get_age_context(data):
     years = data.get("age_years", 0)
@@ -720,7 +638,12 @@ def generate_lullaby_text(data):
 - верни только текст песни
 """
 
-    return openai_text_response(prompt)
+    response = OPENAI_CLIENT.responses.create(
+        model="gpt-5.2",
+        input=prompt
+    )
+
+    return response.output_text
 
 
 def edit_lullaby_text(data, old_text, edit_request):
@@ -767,7 +690,12 @@ def edit_lullaby_text(data, old_text, edit_request):
 - верни только новый текст песни
 """
 
-    return openai_text_response(prompt)
+    response = OPENAI_CLIENT.responses.create(
+        model="gpt-5.2",
+        input=prompt
+    )
+
+    return response.output_text
 
 
 def polish_lullaby_text(data, text):
@@ -803,7 +731,12 @@ def polish_lullaby_text(data, text):
 {text}
 """
 
-    return openai_text_response(prompt)
+    response = OPENAI_CLIENT.responses.create(
+        model="gpt-5.2",
+        input=prompt
+    )
+
+    return response.output_text
 
 
 def add_stress_marks_to_song(data, text):
@@ -832,7 +765,12 @@ def add_stress_marks_to_song(data, text):
 {text}
 """
 
-    return openai_text_response(prompt)
+    response = OPENAI_CLIENT.responses.create(
+        model="gpt-5.2",
+        input=prompt
+    )
+
+    return response.output_text
 
 
 def safety_repair_and_note(data, text):
@@ -854,15 +792,13 @@ def prepare_final_lyrics(data, raw_text):
 
 
 def generate_and_prepare_lullaby(data):
-    data_copy = dict(data)
-    raw_text = generate_lullaby_text(data_copy)
-    return prepare_final_lyrics(data_copy, raw_text)
+    raw_text = generate_lullaby_text(data)
+    return prepare_final_lyrics(data, raw_text)
 
 
 def edit_and_prepare_lullaby(data, old_text, edit_request):
-    data_copy = dict(data)
-    raw_new_text = edit_lullaby_text(data_copy, old_text, edit_request)
-    return prepare_final_lyrics(data_copy, raw_new_text)
+    raw_new_text = edit_lullaby_text(data, old_text, edit_request)
+    return prepare_final_lyrics(data, raw_new_text)
 
 
 # =========================
@@ -892,22 +828,6 @@ def make_music_style(data):
     )
 
 
-def suno_request(method, url, retries=3, **kwargs):
-    last_error = None
-
-    for attempt in range(retries):
-        try:
-            response = requests.request(method, url, timeout=kwargs.pop("timeout", 60), **kwargs)
-            response.raise_for_status()
-            return response
-        except Exception as error:
-            last_error = error
-            if attempt < retries - 1:
-                time.sleep(3 + attempt * 3)
-
-    raise last_error
-
-
 def create_music_task(lyrics, style, title):
     headers = {
         "Authorization": f"Bearer {SUNO_API_KEY}",
@@ -917,23 +837,22 @@ def create_music_task(lyrics, style, title):
     data = {
         "customMode": True,
         "instrumental": False,
-        "model": SUNO_MODEL,
+        "model": "V5_5",
         "prompt": lyrics,
         "style": style,
         "title": title,
         "callBackUrl": "https://example.com/callback"
     }
 
-    response = suno_request(
-        "POST",
+    response = requests.post(
         f"{SUNO_BASE_URL}/api/v1/generate",
         headers=headers,
         json=data,
-        timeout=60,
+        timeout=60
     )
 
-    result = response.json()
-    return result["data"]["taskId"]
+    response.raise_for_status()
+    return response.json()["data"]["taskId"]
 
 
 def get_music_audio_urls(task_id):
@@ -941,21 +860,20 @@ def get_music_audio_urls(task_id):
         "Authorization": f"Bearer {SUNO_API_KEY}"
     }
 
-    response = suno_request(
-        "GET",
+    response = requests.get(
         f"{SUNO_BASE_URL}/api/v1/generate/record-info",
         headers=headers,
         params={"taskId": task_id},
-        timeout=60,
+        timeout=60
     )
 
+    response.raise_for_status()
     result = response.json()
-    data = result.get("data") or {}
 
-    if data.get("status") != "SUCCESS":
+    if result["data"]["status"] != "SUCCESS":
         return []
 
-    songs = (data.get("response") or {}).get("sunoData", [])
+    songs = result["data"]["response"].get("sunoData", [])
     urls = []
 
     for song in songs:
@@ -990,16 +908,16 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     create_user_if_not_exists(update.effective_user)
 
     await update.message.reply_text(
-        f"🌙 Добро пожаловать в {BRAND_NAME}!\n\n"
-        f"Я создаю персональные музыкальные колыбельные для детей 💫\n\n"
-        f"🎵 В каждой песне:\n"
-        f"— имя ребёнка\n"
-        f"— любимые персонажи\n"
-        f"— нежный голос и спокойная музыка\n\n"
-        f"✨ Получается настоящая колыбельная, под которую ребёнок засыпает быстрее и спокойнее 🌙\n\n"
-        f"🌰 1 музыкальная колыбельная = {NUTS_PER_GENERATION} орешка\n\n"
-        f"💛 Давай создадим первую прямо сейчас:",
-        reply_markup=main_menu_keyboard()
+    f"🌙 Добро пожаловать в {BRAND_NAME}!\n\n"
+    f"Я создаю персональные музыкальные колыбельные для детей 💫\n\n"
+    f"🎵 В каждой песне:\n"
+    f"— имя ребёнка\n"
+    f"— любимые персонажи\n"
+    f"— нежный голос и спокойная музыка\n\n"
+    f"✨ Получается настоящая колыбельная, под которую ребёнок засыпает быстрее и спокойнее 🌙\n\n"
+    f"🌰 1 музыкальная колыбельная = {NUTS_PER_GENERATION} орешка\n\n"
+    f"💛 Давай создадим первую прямо сейчас:",
+    reply_markup=main_menu_keyboard()
     )
 
     return START
@@ -1860,40 +1778,24 @@ async def generate_music_button(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    nuts = get_nuts(user_id)
 
-    if user_id in USER_MUSIC_LOCKS:
-        await update.message.reply_text(
-            "🎵 Музыкальная колыбельная уже создаётся.\n\n"
-            "Пожалуйста, дождись результата 🌙",
-            reply_markup=generation_wait_keyboard()
-        )
-        return GENERATE_MUSIC
-
-    if "lullaby_text" not in context.user_data:
-        await update.message.reply_text(
-            "🌙 Текст колыбельной не найден. Давай начнём создание заново.",
-            reply_markup=main_menu_keyboard()
-        )
+    if nuts < NUTS_PER_GENERATION:
+        await offer_buy_nuts(update, user_id)
         return START
 
-    USER_MUSIC_LOCKS.add(user_id)
+    remove_nuts(user_id, NUTS_PER_GENERATION)
+
+    data = context.user_data
+    lullaby_text = data["lullaby_text"]
+
+    await update.message.reply_text(
+        f"🎵 {BRAND_NAME} создаёт музыкальную колыбельную...\n\n"
+        f"Сейчас текст превратится в нежную песню для сна 🌙",
+        reply_markup=generation_wait_keyboard()
+    )
 
     try:
-        if not remove_nuts_safe(user_id, NUTS_PER_GENERATION):
-            await offer_buy_nuts(update, user_id)
-            return START
-
-        data = dict(context.user_data)
-        lullaby_text = data["lullaby_text"]
-
-        await update.message.reply_text(
-            f"🎵 {BRAND_NAME} начинает напевать колыбельную... 🌙
-
-"
-            f"Сейчас текст превратится в нежную песню для сна ✨",
-            reply_markup=generation_wait_keyboard()
-        )
-
         genitive_name = make_genitive_name(data["name"])
         title = f"Колыбельная для {genitive_name}"
         style = make_music_style(data)
@@ -1901,102 +1803,23 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         task_id = await asyncio.to_thread(create_music_task, lullaby_text, style, title)
 
         audio_urls = []
-        total_wait_time = 180  # примерно 3 минуты
-        interval = 10
-        elapsed = 0
 
-        while elapsed < total_wait_time:
-            await asyncio.sleep(interval)
-            elapsed += interval
-
+        for attempt in range(30):
+            await asyncio.sleep(10)
             audio_urls = await asyncio.to_thread(get_music_audio_urls, task_id)
 
             if audio_urls:
                 break
 
-            if elapsed == 10:
+            if attempt == 6:
                 await update.message.reply_text(
-                    "🎵 Колыбелка напевает колыбельную... хрум-хрум 🌙",
+                    "⏳ Музыка ещё создаётся... Уже скоро будет волшебство 🌙",
                     reply_markup=generation_wait_keyboard()
                 )
-            elif elapsed == 20:
+
+            if attempt == 14:
                 await update.message.reply_text(
-                    "✨ Песенка собирается в музыку, белочка слушает мелодию 🎵",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 30:
-                await update.message.reply_text(
-                    "🐿️ Колыбелка всё ещё поёт... получается нежно 🌰",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 40:
-                await update.message.reply_text(
-                    "🌙 Музыка создаётся, скоро будет сонная песенка ✨",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 50:
-                await update.message.reply_text(
-                    "🎵 Белочка проверяет, чтобы голос звучал мягко и спокойно",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 60:
-                await update.message.reply_text(
-                    "✨ Осталось примерно 2 минуты... Колыбелка продолжает напевать 🌙",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 70:
-                await update.message.reply_text(
-                    "🐿️ Хрум-хрум... мелодия становится всё теплее 🌰",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 80:
-                await update.message.reply_text(
-                    "🌙 Колыбельная ещё создаётся, спасибо за терпение ✨",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 90:
-                await update.message.reply_text(
-                    "🎵 Белочка слушает припев и собирает песенку целиком",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 100:
-                await update.message.reply_text(
-                    "🐿️ Ещё немного хрум-хрум... музыка почти раскрылась 🌙",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 110:
-                await update.message.reply_text(
-                    "✨ Колыбелка бережно допевает последние нотки 🎵",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 120:
-                await update.message.reply_text(
-                    "🌙 Осталась примерно 1 минута... уже совсем скоро ✨",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 130:
-                await update.message.reply_text(
-                    "🎵 Песенка почти готова, белочка ждёт финальный звук",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 140:
-                await update.message.reply_text(
-                    "🐿️ Хрум-хрум... Колыбелка собирает файл с музыкой 🌰",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 150:
-                await update.message.reply_text(
-                    "✨ Совсем близко... проверяю музыкальную колыбельную 🌙",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 160:
-                await update.message.reply_text(
-                    "🎵 Ещё чуть-чуть, песенка почти прилетела",
-                    reply_markup=generation_wait_keyboard()
-                )
-            elif elapsed == 170:
-                await update.message.reply_text(
-                    "🌙 Последние секунды ожидания... Колыбелка рядом ✨",
+                    "🎵 Почти готово. Собираю музыкальную колыбельную...",
                     reply_markup=generation_wait_keyboard()
                 )
 
@@ -2011,18 +1834,8 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return START
 
-        audio_url = audio_urls[0]
-        save_generation(
-            user_id=user_id,
-            child_name=data.get("name"),
-            title=title,
-            lyrics=lullaby_text,
-            status="success",
-            task_id=task_id,
-            audio_url=audio_url,
-        )
-
         safe_title = clean_filename(title)
+        audio_url = audio_urls[0]
 
         await update.message.reply_text(
             "✨ Готово! Колыбельная создана 🎵",
@@ -2032,22 +1845,21 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filename = f"{safe_title}.mp3"
         file_path = await asyncio.to_thread(download_audio, audio_url, filename)
 
-        try:
-            with open(file_path, "rb") as audio_file:
-                await update.message.reply_document(
-                    document=audio_file,
-                    filename=filename,
-                    caption=f"🌙 {title}",
-                    read_timeout=180,
-                    write_timeout=180,
-                    connect_timeout=60,
-                    pool_timeout=180
-                )
-        finally:
-            if os.path.exists(file_path):
-                os.remove(file_path)
+        with open(file_path, "rb") as audio_file:
+            await update.message.reply_document(
+                document=audio_file,
+                filename=filename,
+                caption=f"🌙 {title}",
+                read_timeout=180,
+                write_timeout=180,
+                connect_timeout=60,
+                pool_timeout=180
+            )
+
+        os.remove(file_path)
 
         balance = get_nuts(user_id)
+
         context.user_data.clear()
 
         await update.message.reply_text(
@@ -2062,6 +1874,7 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as error:
         print("Ошибка Suno/музыки:", error)
+
         add_nuts(user_id, NUTS_PER_GENERATION)
 
         await update.message.reply_text(
@@ -2071,9 +1884,6 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu_keyboard()
         )
         return START
-
-    finally:
-        USER_MUSIC_LOCKS.discard(user_id)
 
 
 # =========================
@@ -2094,15 +1904,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     print("⚠️ Ошибка Telegram/сети:", context.error)
-
-    try:
-        if update and getattr(update, "message", None):
-            await update.message.reply_text(
-                "🌙 Что-то пошло не так. Попробуй ещё раз или нажми «🔄 Начать заново».",
-                reply_markup=main_menu_keyboard()
-            )
-    except Exception as error:
-        print("Не удалось отправить сообщение об ошибке:", error)
 
 
 def main():
