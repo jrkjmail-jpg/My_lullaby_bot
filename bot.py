@@ -1,5 +1,6 @@
 import os
 import re
+import uuid
 import sqlite3
 import asyncio
 import tempfile
@@ -24,20 +25,40 @@ BRAND_NAME = "Колыбелка"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SUNO_API_KEY = os.getenv("SUNO_API_KEY")
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
+YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL", "https://t.me/")
+YOOKASSA_VAT_CODE = int(os.getenv("YOOKASSA_VAT_CODE", "1"))
+YOOKASSA_TAX_SYSTEM_CODE = os.getenv("YOOKASSA_TAX_SYSTEM_CODE")
 
 OPENAI_CLIENT = OpenAI(api_key=OPENAI_API_KEY)
 SUNO_BASE_URL = "https://api.sunoapi.org"
+YOOKASSA_BASE_URL = "https://api.yookassa.ru/v3"
 
 DB_PATH = "kolybelka.db"
 
 MAX_EDITS = 5
-NUTS_PER_GENERATION = 2
+LULLABIES_PER_GENERATION = 1
 
-NUT_PACKAGES = {
-    "🌰 Купить 3 орешка": 3,
-    "🌰 Купить 5 орешков": 5,
-    "🌰 Купить 10 орешков": 10,
+LULLABY_PACKAGES = {
+    "🌙 Купить 1 колыбельную": {
+        "lullabies": 1,
+        "price": "350.00",
+        "title": "1 персональная музыкальная колыбельная",
+    },
+    "🌙 Купить 2 колыбельные": {
+        "lullabies": 2,
+        "price": "500.00",
+        "title": "2 персональные музыкальные колыбельные",
+    },
+    "🌙 Купить 3 колыбельные": {
+        "lullabies": 3,
+        "price": "600.00",
+        "title": "3 персональные музыкальные колыбельные",
+    },
 }
+
+PAYMENT_CHECK_BUTTON = "✅ Проверить оплату"
 
 (
     START,
@@ -56,7 +77,8 @@ NUT_PACKAGES = {
     LULLABY_REVIEW,
     EDIT_REQUEST,
     GENERATE_MUSIC,
-) = range(16)
+    PAYMENT_EMAIL_INPUT,
+) = range(17)
 
 
 BAD_WORDS = [
@@ -107,7 +129,7 @@ def main_menu_keyboard():
 
 def profile_keyboard():
     return keyboard([
-        ["🌰 Купить орешки"],
+        ["💳 Купить колыбельные"],
         ["🌙 Создать новую колыбельную"],
         ["🏠 Главное меню"],
     ], with_nav=False)
@@ -115,9 +137,10 @@ def profile_keyboard():
 
 def buy_keyboard():
     return keyboard([
-        ["🌰 Купить 3 орешка"],
-        ["🌰 Купить 5 орешков"],
-        ["🌰 Купить 10 орешков"],
+        ["🌙 Купить 1 колыбельную"],
+        ["🌙 Купить 2 колыбельные"],
+        ["🌙 Купить 3 колыбельные"],
+        [PAYMENT_CHECK_BUTTON],
         ["🏠 Главное меню"],
     ], with_nav=False)
 
@@ -167,12 +190,47 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            nuts INTEGER DEFAULT 0
+            nuts INTEGER DEFAULT 0,
+            lullabies INTEGER DEFAULT 0
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            local_payment_id TEXT PRIMARY KEY,
+            yookassa_payment_id TEXT,
+            user_id INTEGER NOT NULL,
+            package_key TEXT NOT NULL,
+            package_title TEXT NOT NULL,
+            nuts INTEGER NOT NULL,
+            lullabies INTEGER DEFAULT 0,
+            amount_value TEXT NOT NULL,
+            currency TEXT NOT NULL DEFAULT 'RUB',
+            status TEXT NOT NULL DEFAULT 'created',
+            confirmation_url TEXT,
+            customer_email TEXT,
+            credited INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            paid_at TEXT
+        )
+    """)
+
+    ensure_column(cur, "users", "lullabies", "INTEGER DEFAULT 0")
+    ensure_column(cur, "payments", "lullabies", "INTEGER DEFAULT 0")
+    ensure_column(cur, "payments", "customer_email", "TEXT")
+
     conn.commit()
     conn.close()
+
+
+def ensure_column(cur, table_name, column_name, column_definition):
+    cur.execute(f"PRAGMA table_info({table_name})")
+    existing_columns = {row[1] for row in cur.fetchall()}
+
+    if column_name not in existing_columns:
+        cur.execute(
+            f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+        )
 
 
 def create_user_if_not_exists(user):
@@ -200,6 +258,18 @@ def get_nuts(user_id):
     return row[0] if row else 0
 
 
+def get_lullabies(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("SELECT lullabies FROM users WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+
+    conn.close()
+
+    return row[0] if row else 0
+
+
 def add_nuts(user_id, amount):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -207,6 +277,20 @@ def add_nuts(user_id, amount):
     cur.execute("""
         UPDATE users
         SET nuts = nuts + ?
+        WHERE user_id = ?
+    """, (amount, user_id))
+
+    conn.commit()
+    conn.close()
+
+
+def add_lullabies(user_id, amount):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+        UPDATE users
+        SET lullabies = lullabies + ?
         WHERE user_id = ?
     """, (amount, user_id))
 
@@ -226,6 +310,159 @@ def remove_nuts(user_id, amount):
 
     conn.commit()
     conn.close()
+
+
+def remove_lullabies(user_id, amount):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+        UPDATE users
+        SET lullabies = lullabies - ?
+        WHERE user_id = ? AND lullabies >= ?
+    """, (amount, user_id, amount))
+
+    changed = cur.rowcount
+
+    conn.commit()
+    conn.close()
+
+    return changed > 0
+
+
+def create_local_payment_order(user_id, package_key, customer_email):
+    package = LULLABY_PACKAGES[package_key]
+    local_payment_id = f"lullaby_{uuid.uuid4().hex}"
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO payments (
+            local_payment_id, user_id, package_key, package_title,
+            nuts, lullabies, amount_value, currency, status, customer_email
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'RUB', 'created', ?)
+    """, (
+        local_payment_id,
+        user_id,
+        package_key,
+        package["title"],
+        0,
+        package["lullabies"],
+        package["price"],
+        customer_email,
+    ))
+
+    conn.commit()
+    conn.close()
+
+    return local_payment_id
+
+
+def update_payment_order(local_payment_id, yookassa_payment_id, status, confirmation_url):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+        UPDATE payments
+        SET yookassa_payment_id = ?,
+            status = ?,
+            confirmation_url = ?
+        WHERE local_payment_id = ?
+    """, (yookassa_payment_id, status, confirmation_url, local_payment_id))
+
+    conn.commit()
+    conn.close()
+
+
+def mark_payment_status(local_payment_id, status):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+        UPDATE payments
+        SET status = ?
+        WHERE local_payment_id = ?
+    """, (status, local_payment_id))
+
+    conn.commit()
+    conn.close()
+
+
+def get_latest_uncredited_payment(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            local_payment_id, yookassa_payment_id, package_title, lullabies,
+            amount_value, currency, status, confirmation_url, credited
+        FROM payments
+        WHERE user_id = ? AND credited = 0
+        ORDER BY created_at DESC
+        LIMIT 1
+    """, (user_id,))
+
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    return {
+        "local_payment_id": row[0],
+        "yookassa_payment_id": row[1],
+        "package_title": row[2],
+        "lullabies": row[3],
+        "amount_value": row[4],
+        "currency": row[5],
+        "status": row[6],
+        "confirmation_url": row[7],
+        "credited": row[8],
+    }
+
+
+def credit_payment_if_needed(local_payment_id, yookassa_payment_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT user_id, lullabies, credited
+        FROM payments
+        WHERE local_payment_id = ? AND yookassa_payment_id = ?
+    """, (local_payment_id, yookassa_payment_id))
+
+    row = cur.fetchone()
+
+    if not row:
+        conn.close()
+        return None, False
+
+    user_id, lullabies, credited = row
+
+    if credited:
+        conn.close()
+        return {"user_id": user_id, "lullabies": lullabies}, False
+
+    cur.execute("""
+        UPDATE users
+        SET lullabies = lullabies + ?
+        WHERE user_id = ?
+    """, (lullabies, user_id))
+
+    cur.execute("""
+        UPDATE payments
+        SET status = 'succeeded',
+            credited = 1,
+            paid_at = CURRENT_TIMESTAMP
+        WHERE local_payment_id = ?
+    """, (local_payment_id,))
+
+    conn.commit()
+    conn.close()
+
+    return {"user_id": user_id, "lullabies": lullabies}, True
 
 
 # =========================
@@ -310,6 +547,15 @@ def validate_common(text):
         return False, "🌙 Давай без грубых слов — мы создаём нежную детскую колыбельную."
 
     return True, ""
+
+
+def validate_email(email):
+    email = email.strip()
+
+    if len(email) > 120:
+        return False
+
+    return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email))
 
 
 def make_stressed_name(name_text):
@@ -901,6 +1147,242 @@ def download_audio(audio_url, filename):
 
 
 # =========================
+# ЮKASSA
+# =========================
+
+def yookassa_is_configured():
+    return bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
+
+
+def create_yookassa_payment(user_id, package_key, customer_email):
+    package = LULLABY_PACKAGES[package_key]
+    local_payment_id = create_local_payment_order(user_id, package_key, customer_email)
+
+    payload = {
+        "amount": {
+            "value": package["price"],
+            "currency": "RUB",
+        },
+        "capture": True,
+        "confirmation": {
+            "type": "redirect",
+            "return_url": YOOKASSA_RETURN_URL,
+        },
+        "description": f"{BRAND_NAME}: {package['title']}",
+        "metadata": {
+            "local_payment_id": local_payment_id,
+            "user_id": str(user_id),
+            "lullabies": str(package["lullabies"]),
+        },
+        "receipt": {
+            "customer": {
+                "email": customer_email,
+            },
+            "items": [
+                {
+                    "description": package["title"],
+                    "quantity": "1.00",
+                    "amount": {
+                        "value": package["price"],
+                        "currency": "RUB",
+                    },
+                    "vat_code": YOOKASSA_VAT_CODE,
+                    "payment_subject": "service",
+                    "payment_mode": "full_payment",
+                }
+            ],
+        },
+    }
+
+    if YOOKASSA_TAX_SYSTEM_CODE:
+        payload["receipt"]["tax_system_code"] = int(YOOKASSA_TAX_SYSTEM_CODE)
+
+    response = requests.post(
+        f"{YOOKASSA_BASE_URL}/payments",
+        auth=(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY),
+        headers={
+            "Content-Type": "application/json",
+            "Idempotence-Key": local_payment_id,
+        },
+        json=payload,
+        timeout=60,
+    )
+
+    try:
+        response.raise_for_status()
+    except requests.HTTPError:
+        mark_payment_status(local_payment_id, "failed")
+        raise
+
+    result = response.json()
+    confirmation_url = result.get("confirmation", {}).get("confirmation_url")
+
+    update_payment_order(
+        local_payment_id,
+        result["id"],
+        result["status"],
+        confirmation_url,
+    )
+
+    return {
+        "local_payment_id": local_payment_id,
+        "yookassa_payment_id": result["id"],
+        "status": result["status"],
+        "confirmation_url": confirmation_url,
+        "package": package,
+    }
+
+
+def get_yookassa_payment(yookassa_payment_id):
+    response = requests.get(
+        f"{YOOKASSA_BASE_URL}/payments/{yookassa_payment_id}",
+        auth=(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY),
+        timeout=60,
+    )
+
+    response.raise_for_status()
+    return response.json()
+
+
+async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, package_key, customer_email):
+    if not yookassa_is_configured():
+        await update.message.reply_text(
+            "😔 Оплата пока не настроена. Попробуй позже.",
+            reply_markup=profile_keyboard()
+        )
+        return
+
+    try:
+        payment = await asyncio.to_thread(
+            create_yookassa_payment,
+            update.effective_user.id,
+            package_key,
+            customer_email,
+        )
+    except Exception as error:
+        print("Ошибка создания платежа ЮKassa:", error)
+        await update.message.reply_text(
+            "😔 Не получилось создать ссылку на оплату.\n\n"
+            "Попробуй ещё раз чуть позже.",
+            reply_markup=buy_keyboard()
+        )
+        return
+
+    package = payment["package"]
+    payment_url = payment["confirmation_url"]
+
+    if not payment_url:
+        await update.message.reply_text(
+            "😔 ЮKassa не вернула ссылку на оплату.\n\n"
+            "Попробуй выбрать пакет ещё раз.",
+            reply_markup=buy_keyboard()
+        )
+        return
+
+    await update.message.reply_text(
+        f"🌙 Пакет: {package['title']}\n"
+        f"💳 Стоимость: {package['price']} ₽\n\n"
+        f"Оплати по ссылке ЮKassa:\n{payment_url}\n\n"
+        f"После оплаты нажми «{PAYMENT_CHECK_BUTTON}».",
+        reply_markup=buy_keyboard()
+    )
+
+
+async def check_latest_payment(update: Update):
+    if not yookassa_is_configured():
+        await update.message.reply_text(
+            "😔 Оплата пока не настроена. Попробуй позже.",
+            reply_markup=profile_keyboard()
+        )
+        return
+
+    user_id = update.effective_user.id
+    payment = get_latest_uncredited_payment(user_id)
+
+    if not payment:
+        await update.message.reply_text(
+            "🌙 Я не нашла неоплаченную покупку.\n\n"
+            "Выбери пакет колыбельных, и я пришлю ссылку на оплату.",
+            reply_markup=buy_keyboard()
+        )
+        return
+
+    if not payment["yookassa_payment_id"]:
+        await update.message.reply_text(
+            "😔 Платёж ещё не был создан в ЮKassa.\n\n"
+            "Попробуй выбрать пакет ещё раз.",
+            reply_markup=buy_keyboard()
+        )
+        return
+
+    try:
+        yookassa_payment = await asyncio.to_thread(
+            get_yookassa_payment,
+            payment["yookassa_payment_id"],
+        )
+    except Exception as error:
+        print("Ошибка проверки платежа ЮKassa:", error)
+        await update.message.reply_text(
+            "😔 Не получилось проверить оплату.\n\n"
+            "Попробуй ещё раз чуть позже.",
+            reply_markup=buy_keyboard()
+        )
+        return
+
+    status = yookassa_payment.get("status")
+
+    if status == "succeeded" and yookassa_payment.get("paid"):
+        order, credited_now = credit_payment_if_needed(
+            payment["local_payment_id"],
+            payment["yookassa_payment_id"],
+        )
+
+        if not order:
+            await update.message.reply_text(
+                "Платёж прошёл, но заказ не найден. Напиши поддержке, мы всё проверим.",
+                reply_markup=main_menu_keyboard()
+            )
+            return
+
+        balance = get_lullabies(order["user_id"])
+
+        if credited_now:
+            await update.message.reply_text(
+                f"✅ Оплата прошла успешно!\n\n"
+                f"🌙 Начислено: {order['lullabies']} колыбельных\n"
+                f"Текущий баланс: {balance} колыбельных\n\n"
+                f"Теперь можно создать персональную колыбельную 🌙🎵",
+                reply_markup=profile_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                f"✅ Эта оплата уже была учтена.\n\n"
+                f"🌙 Текущий баланс: {balance} колыбельных",
+                reply_markup=profile_keyboard()
+            )
+
+        return
+
+    if status == "canceled":
+        mark_payment_status(payment["local_payment_id"], "canceled")
+        await update.message.reply_text(
+            "😔 Платёж отменён или истёк.\n\n"
+            "Можно выбрать пакет заново.",
+            reply_markup=buy_keyboard()
+        )
+        return
+
+    mark_payment_status(payment["local_payment_id"], status or payment["status"])
+
+    await update.message.reply_text(
+        f"⏳ Оплата пока не прошла.\n\n"
+        f"Если ты уже оплатил, подожди немного и нажми «{PAYMENT_CHECK_BUTTON}» ещё раз.\n\n"
+        f"Ссылка на оплату:\n{payment['confirmation_url']}",
+        reply_markup=buy_keyboard()
+    )
+
+
+# =========================
 # МЕНЮ
 # =========================
 
@@ -915,7 +1397,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     f"— любимые персонажи\n"
     f"— нежный голос и спокойная музыка\n\n"
     f"✨ Получается настоящая колыбельная, под которую ребёнок засыпает быстрее и спокойнее 🌙\n\n"
-    f"🌰 1 музыкальная колыбельная = {NUTS_PER_GENERATION} орешка\n\n"
+    f"💳 Сначала выбери пакет колыбельных, потом я создам текст и музыку.\n\n"
     f"💛 Давай создадим первую прямо сейчас:",
     reply_markup=main_menu_keyboard()
     )
@@ -928,14 +1410,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await show_main_menu(update, context)
 
 
-async def offer_buy_nuts(update: Update, user_id):
-    nuts = get_nuts(user_id)
+async def offer_buy_lullabies(update: Update, user_id):
+    lullabies = get_lullabies(user_id)
 
     await update.message.reply_text(
-        f"🐿️ {BRAND_NAME} сгрызла все орешки!\n\n"
-        f"🌰 Сейчас на балансе: {nuts} орешков\n"
-        f"🎵 Для одной музыкальной колыбельной нужно: {NUTS_PER_GENERATION} орешка\n\n"
-        f"Можно докупить орешки и сразу продолжить волшебство 🌙",
+        f"🌙 На балансе пока нет оплаченных колыбельных.\n\n"
+        f"Сейчас доступно: {lullabies}\n"
+        f"Для создания текста и музыки нужна 1 оплаченная колыбельная.\n\n"
+        f"Выбери пакет, и после оплаты можно будет сразу начать создание.",
         reply_markup=buy_keyboard()
     )
 
@@ -957,45 +1439,47 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_main_menu(update, context)
 
     if text == "👤 Личный кабинет":
-        nuts = get_nuts(user_id)
+        lullabies = get_lullabies(user_id)
 
         await update.message.reply_text(
             f"👤 Личный кабинет\n\n"
-            f"🌰 Твой баланс: {nuts} орешков\n\n"
-            f"🎵 1 музыкальная колыбельная = {NUTS_PER_GENERATION} орешка\n\n"
-            f"Здесь можно пополнить баланс или сразу создать новую колыбельную 🌙",
+            f"🌙 Оплаченных колыбельных: {lullabies}\n\n"
+            f"Одна колыбельная включает создание текста, правки текста и музыкальную версию.\n\n"
+            f"Здесь можно купить пакет или сразу создать новую колыбельную 🌙",
             reply_markup=profile_keyboard()
         )
         return START
 
-    if text == "🌰 Купить орешки":
+    if text == "💳 Купить колыбельные":
         await update.message.reply_text(
-            "🌰 Выбери пакет орешков\n\n"
-            "Орешки нужны, чтобы создавать музыкальные колыбельные 🎵\n\n"
-            "Сейчас покупка работает в тестовом режиме.",
+            "💳 Выбери пакет колыбельных\n\n"
+            "1 колыбельная — 350 ₽\n"
+            "2 колыбельные — 500 ₽\n"
+            "3 колыбельные — 600 ₽\n\n"
+            "Оплата нужна до создания текста, потому что текст и правки тоже создаются через AI.",
             reply_markup=buy_keyboard()
         )
         return START
 
-    if text in NUT_PACKAGES:
-        amount = NUT_PACKAGES[text]
-        add_nuts(user_id, amount)
-        balance = get_nuts(user_id)
+    if text in LULLABY_PACKAGES:
+        context.user_data["pending_payment_package_key"] = text
 
         await update.message.reply_text(
-            f"✅ Готово! {BRAND_NAME} получила новые орешки 🌰\n\n"
-            f"Начислено: {amount} орешков\n"
-            f"Текущий баланс: {balance} орешков\n\n"
-            f"Теперь можно создать музыкальную колыбельную 🌙🎵",
-            reply_markup=profile_keyboard()
+            "📧 Напиши email для чека.\n\n"
+            "ЮKassa отправит чек на этот email после оплаты.",
+            reply_markup=keyboard([])
         )
+        return PAYMENT_EMAIL_INPUT
+
+    if text == PAYMENT_CHECK_BUTTON:
+        await check_latest_payment(update)
         return START
 
     if is_create_lullaby(text):
-        nuts = get_nuts(user_id)
+        lullabies = get_lullabies(user_id)
 
-        if nuts < NUTS_PER_GENERATION:
-            await offer_buy_nuts(update, user_id)
+        if lullabies < LULLABIES_PER_GENERATION:
+            await offer_buy_lullabies(update, user_id)
             return START
 
         context.user_data.clear()
@@ -1020,6 +1504,43 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🌙 Пожалуйста, выбери действие кнопкой ниже.",
         reply_markup=main_menu_keyboard()
     )
+    return START
+
+
+async def payment_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    if is_restart(text):
+        return await start(update, context)
+
+    if is_back(text) or is_home(text):
+        context.user_data.pop("pending_payment_package_key", None)
+        await update.message.reply_text(
+            "💳 Выбери пакет колыбельных:",
+            reply_markup=buy_keyboard()
+        )
+        return START
+
+    if not validate_email(text):
+        await update.message.reply_text(
+            "🌙 Похоже, email написан с ошибкой.\n\n"
+            "Напиши email ещё раз, например: name@mail.ru",
+            reply_markup=keyboard([])
+        )
+        return PAYMENT_EMAIL_INPUT
+
+    package_key = context.user_data.get("pending_payment_package_key")
+
+    if package_key not in LULLABY_PACKAGES:
+        await update.message.reply_text(
+            "😔 Не нашла выбранный пакет.\n\n"
+            "Выбери пакет колыбельных ещё раз.",
+            reply_markup=buy_keyboard()
+        )
+        return START
+
+    context.user_data.pop("pending_payment_package_key", None)
+    await send_payment_link(update, context, package_key, text)
     return START
 
 
@@ -1577,6 +2098,15 @@ async def final_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return FINAL_CONFIRM
 
+    user_id = update.effective_user.id
+
+    if not context.user_data.get("lullaby_credit_used"):
+        if not remove_lullabies(user_id, LULLABIES_PER_GENERATION):
+            await offer_buy_lullabies(update, user_id)
+            return START
+
+        context.user_data["lullaby_credit_used"] = True
+
     await update.message.reply_text(
         f"✨ {BRAND_NAME} сочиняет колыбельную и расставляет правильные ударения 🌙",
         reply_markup=generation_wait_keyboard()
@@ -1605,9 +2135,14 @@ async def final_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as error:
         print("Ошибка OpenAI:", error)
+
+        if context.user_data.get("lullaby_credit_used"):
+            add_lullabies(update.effective_user.id, LULLABIES_PER_GENERATION)
+            context.user_data.pop("lullaby_credit_used", None)
+
         await update.message.reply_text(
             "😔 Не получилось создать текст колыбельной.\n\n"
-            "Иногда сервис отвечает слишком долго. Можно попробовать ещё раз или начать заново.",
+            "Иногда сервис отвечает слишком долго. Колыбельная вернулась на баланс, можно попробовать ещё раз.",
             reply_markup=keyboard([
                 ["✨ Создать текст"],
                 ["✏️ Изменить данные"]
@@ -1778,15 +2313,15 @@ async def generate_music_button(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    nuts = get_nuts(user_id)
+    data = context.user_data
 
-    if nuts < NUTS_PER_GENERATION:
-        await offer_buy_nuts(update, user_id)
+    if not data.get("lullaby_credit_used"):
+        await update.message.reply_text(
+            "🌙 Сначала нужно оплатить колыбельную и создать текст.",
+            reply_markup=main_menu_keyboard()
+        )
         return START
 
-    remove_nuts(user_id, NUTS_PER_GENERATION)
-
-    data = context.user_data
     lullaby_text = data["lullaby_text"]
 
     await update.message.reply_text(
@@ -1824,11 +2359,12 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
         if not audio_urls:
-            add_nuts(user_id, NUTS_PER_GENERATION)
+            add_lullabies(user_id, LULLABIES_PER_GENERATION)
+            context.user_data.clear()
 
             await update.message.reply_text(
                 "😔 Музыкальная колыбельная пока не готова.\n\n"
-                "🌰 Орешки вернулись на баланс.\n\n"
+                "🌙 Колыбельная вернулась на баланс.\n\n"
                 "Можно попробовать создать музыку позже или зайти в личный кабинет.",
                 reply_markup=main_menu_keyboard()
             )
@@ -1858,14 +2394,14 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         os.remove(file_path)
 
-        balance = get_nuts(user_id)
+        balance = get_lullabies(user_id)
 
         context.user_data.clear()
 
         await update.message.reply_text(
             f"🌙 Всё готово!\n\n"
             f"Спасибо, что создали колыбельную в {BRAND_NAME} ✨\n\n"
-            f"🌰 Баланс: {balance} орешков\n\n"
+            f"🌙 Оплаченных колыбельных осталось: {balance}\n\n"
             f"Можно создать новую колыбельную или зайти в личный кабинет.",
             reply_markup=main_menu_keyboard()
         )
@@ -1875,11 +2411,12 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as error:
         print("Ошибка Suno/музыки:", error)
 
-        add_nuts(user_id, NUTS_PER_GENERATION)
+        add_lullabies(user_id, LULLABIES_PER_GENERATION)
+        context.user_data.clear()
 
         await update.message.reply_text(
             "😔 Не получилось создать музыкальную колыбельную.\n\n"
-            "🌰 Орешки вернулись на баланс.\n\n"
+            "🌙 Колыбельная вернулась на баланс.\n\n"
             "Можно попробовать позже или зайти в личный кабинет.",
             reply_markup=main_menu_keyboard()
         )
@@ -1921,6 +2458,14 @@ def main():
         print("Ошибка: SUNO_API_KEY не найден")
         return
 
+    if not YOOKASSA_SHOP_ID:
+        print("Ошибка: YOOKASSA_SHOP_ID не найден")
+        return
+
+    if not YOOKASSA_SECRET_KEY:
+        print("Ошибка: YOOKASSA_SECRET_KEY не найден")
+        return
+
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
@@ -1956,6 +2501,7 @@ def main():
             LULLABY_REVIEW: [MessageHandler(filters.TEXT & ~filters.COMMAND, lullaby_review)],
             EDIT_REQUEST: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_request)],
             GENERATE_MUSIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, generate_music_button)],
+            PAYMENT_EMAIL_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_email_input)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
