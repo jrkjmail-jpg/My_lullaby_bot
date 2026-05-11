@@ -2454,13 +2454,8 @@ def main():
         print("Ошибка: SUNO_API_KEY не найден")
         return
 
-    if not YOOKASSA_SHOP_ID:
-        print("Ошибка: YOOKASSA_SHOP_ID не найден")
-        return
-
-    if not YOOKASSA_SECRET_KEY:
-        print("Ошибка: YOOKASSA_SECRET_KEY не найден")
-        return
+    if not yookassa_is_configured():
+        print("ЮKassa не настроена: бот запустится, но оплата будет временно недоступна")
 
     app = (
         Application.builder()
