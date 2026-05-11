@@ -38,23 +38,26 @@ YOOKASSA_BASE_URL = "https://api.yookassa.ru/v3"
 DB_PATH = "kolybelka.db"
 
 MAX_EDITS = 5
-LULLABIES_PER_GENERATION = 1
+NUTS_PER_GENERATION = 1
 
-LULLABY_PACKAGES = {
-    "🌙 Купить 1 колыбельную": {
-        "lullabies": 1,
+NUT_PACKAGES = {
+    "🌰 Купить 1 генерацию": {
+        "nuts": 1,
         "price": "350.00",
-        "title": "1 персональная музыкальная колыбельная",
+        "title": "1 генерация 🌰",
+        "receipt_title": "1 персональная музыкальная колыбельная",
     },
-    "🌙 Купить 2 колыбельные": {
-        "lullabies": 2,
+    "🌰 Купить 2 генерации": {
+        "nuts": 2,
         "price": "500.00",
-        "title": "2 персональные музыкальные колыбельные",
+        "title": "2 генерации 🌰",
+        "receipt_title": "2 персональные музыкальные колыбельные",
     },
-    "🌙 Купить 3 колыбельные": {
-        "lullabies": 3,
+    "🌰 Купить 3 генерации": {
+        "nuts": 3,
         "price": "600.00",
-        "title": "3 персональные музыкальные колыбельные",
+        "title": "3 генерации 🌰",
+        "receipt_title": "3 персональные музыкальные колыбельные",
     },
 }
 
@@ -129,7 +132,7 @@ def main_menu_keyboard():
 
 def profile_keyboard():
     return keyboard([
-        ["💳 Купить колыбельные"],
+        ["🌰 Купить генерации"],
         ["🌙 Создать новую колыбельную"],
         ["🏠 Главное меню"],
     ], with_nav=False)
@@ -137,9 +140,9 @@ def profile_keyboard():
 
 def buy_keyboard():
     return keyboard([
-        ["🌙 Купить 1 колыбельную"],
-        ["🌙 Купить 2 колыбельные"],
-        ["🌙 Купить 3 колыбельные"],
+        ["🌰 Купить 1 генерацию"],
+        ["🌰 Купить 2 генерации"],
+        ["🌰 Купить 3 генерации"],
         [PAYMENT_CHECK_BUTTON],
         ["🏠 Главное меню"],
     ], with_nav=False)
@@ -331,8 +334,8 @@ def remove_lullabies(user_id, amount):
 
 
 def create_local_payment_order(user_id, package_key, customer_email):
-    package = LULLABY_PACKAGES[package_key]
-    local_payment_id = f"lullaby_{uuid.uuid4().hex}"
+    package = NUT_PACKAGES[package_key]
+    local_payment_id = f"nuts_{uuid.uuid4().hex}"
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -348,8 +351,8 @@ def create_local_payment_order(user_id, package_key, customer_email):
         user_id,
         package_key,
         package["title"],
+        package["nuts"],
         0,
-        package["lullabies"],
         package["price"],
         customer_email,
     ))
@@ -396,7 +399,7 @@ def get_latest_uncredited_payment(user_id):
 
     cur.execute("""
         SELECT
-            local_payment_id, yookassa_payment_id, package_title, lullabies,
+            local_payment_id, yookassa_payment_id, package_title, nuts,
             amount_value, currency, status, confirmation_url, credited
         FROM payments
         WHERE user_id = ? AND credited = 0
@@ -414,7 +417,7 @@ def get_latest_uncredited_payment(user_id):
         "local_payment_id": row[0],
         "yookassa_payment_id": row[1],
         "package_title": row[2],
-        "lullabies": row[3],
+        "nuts": row[3],
         "amount_value": row[4],
         "currency": row[5],
         "status": row[6],
@@ -428,7 +431,7 @@ def credit_payment_if_needed(local_payment_id, yookassa_payment_id):
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT user_id, lullabies, credited
+        SELECT user_id, nuts, credited
         FROM payments
         WHERE local_payment_id = ? AND yookassa_payment_id = ?
     """, (local_payment_id, yookassa_payment_id))
@@ -439,17 +442,17 @@ def credit_payment_if_needed(local_payment_id, yookassa_payment_id):
         conn.close()
         return None, False
 
-    user_id, lullabies, credited = row
+    user_id, nuts, credited = row
 
     if credited:
         conn.close()
-        return {"user_id": user_id, "lullabies": lullabies}, False
+        return {"user_id": user_id, "nuts": nuts}, False
 
     cur.execute("""
         UPDATE users
-        SET lullabies = lullabies + ?
+        SET nuts = nuts + ?
         WHERE user_id = ?
-    """, (lullabies, user_id))
+    """, (nuts, user_id))
 
     cur.execute("""
         UPDATE payments
@@ -462,7 +465,7 @@ def credit_payment_if_needed(local_payment_id, yookassa_payment_id):
     conn.commit()
     conn.close()
 
-    return {"user_id": user_id, "lullabies": lullabies}, True
+    return {"user_id": user_id, "nuts": nuts}, True
 
 
 # =========================
@@ -1155,7 +1158,7 @@ def yookassa_is_configured():
 
 
 def create_yookassa_payment(user_id, package_key, customer_email):
-    package = LULLABY_PACKAGES[package_key]
+    package = NUT_PACKAGES[package_key]
     local_payment_id = create_local_payment_order(user_id, package_key, customer_email)
 
     payload = {
@@ -1172,7 +1175,7 @@ def create_yookassa_payment(user_id, package_key, customer_email):
         "metadata": {
             "local_payment_id": local_payment_id,
             "user_id": str(user_id),
-            "lullabies": str(package["lullabies"]),
+            "nuts": str(package["nuts"]),
         },
         "receipt": {
             "customer": {
@@ -1180,7 +1183,7 @@ def create_yookassa_payment(user_id, package_key, customer_email):
             },
             "items": [
                 {
-                    "description": package["title"],
+                    "description": package["receipt_title"],
                     "quantity": "1.00",
                     "amount": {
                         "value": package["price"],
@@ -1302,7 +1305,7 @@ async def check_latest_payment(update: Update):
     if not payment:
         await update.message.reply_text(
             "🌙 Я не нашла неоплаченную покупку.\n\n"
-            "Выбери пакет колыбельных, и я пришлю ссылку на оплату.",
+            "Выбери пакет генераций 🌰, и я пришлю ссылку на оплату.",
             reply_markup=buy_keyboard()
         )
         return
@@ -1344,20 +1347,20 @@ async def check_latest_payment(update: Update):
             )
             return
 
-        balance = get_lullabies(order["user_id"])
+        balance = get_nuts(order["user_id"])
 
         if credited_now:
             await update.message.reply_text(
                 f"✅ Оплата прошла успешно!\n\n"
-                f"🌙 Начислено: {order['lullabies']} колыбельных\n"
-                f"Текущий баланс: {balance} колыбельных\n\n"
+                f"Начислено: {order['nuts']} генераций 🌰\n"
+                f"Текущий баланс: {balance} генераций 🌰\n\n"
                 f"Теперь можно создать персональную колыбельную 🌙🎵",
                 reply_markup=profile_keyboard()
             )
         else:
             await update.message.reply_text(
                 f"✅ Эта оплата уже была учтена.\n\n"
-                f"🌙 Текущий баланс: {balance} колыбельных",
+                f"Текущий баланс: {balance} генераций 🌰",
                 reply_markup=profile_keyboard()
             )
 
@@ -1397,7 +1400,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     f"— любимые персонажи\n"
     f"— нежный голос и спокойная музыка\n\n"
     f"✨ Получается настоящая колыбельная, под которую ребёнок засыпает быстрее и спокойнее 🌙\n\n"
-    f"💳 Сначала выбери пакет колыбельных, потом я создам текст и музыку.\n\n"
+    f"1 генерация 🌰 = 1 персональная музыкальная колыбельная\n\n"
     f"💛 Давай создадим первую прямо сейчас:",
     reply_markup=main_menu_keyboard()
     )
@@ -1410,13 +1413,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await show_main_menu(update, context)
 
 
-async def offer_buy_lullabies(update: Update, user_id):
-    lullabies = get_lullabies(user_id)
+async def offer_buy_nuts(update: Update, user_id):
+    nuts = get_nuts(user_id)
 
     await update.message.reply_text(
-        f"🌙 На балансе пока нет оплаченных колыбельных.\n\n"
-        f"Сейчас доступно: {lullabies}\n"
-        f"Для создания текста и музыки нужна 1 оплаченная колыбельная.\n\n"
+        f"🌙 На балансе пока нет генераций 🌰\n\n"
+        f"Сейчас доступно: {nuts}\n"
+        f"Для создания колыбельной нужна 1 генерация 🌰\n\n"
         f"Выбери пакет, и после оплаты можно будет сразу начать создание.",
         reply_markup=buy_keyboard()
     )
@@ -1439,29 +1442,29 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_main_menu(update, context)
 
     if text == "👤 Личный кабинет":
-        lullabies = get_lullabies(user_id)
+        nuts = get_nuts(user_id)
 
         await update.message.reply_text(
             f"👤 Личный кабинет\n\n"
-            f"🌙 Оплаченных колыбельных: {lullabies}\n\n"
-            f"Одна колыбельная включает создание текста, правки текста и музыкальную версию.\n\n"
+            f"Твой баланс: {nuts} генераций 🌰\n\n"
+            f"1 генерация 🌰 = 1 персональная музыкальная колыбельная.\n\n"
             f"Здесь можно купить пакет или сразу создать новую колыбельную 🌙",
             reply_markup=profile_keyboard()
         )
         return START
 
-    if text == "💳 Купить колыбельные":
+    if text == "🌰 Купить генерации":
         await update.message.reply_text(
-            "💳 Выбери пакет колыбельных\n\n"
-            "1 колыбельная — 350 ₽\n"
-            "2 колыбельные — 500 ₽\n"
-            "3 колыбельные — 600 ₽\n\n"
-            "Оплата нужна до создания текста, потому что текст и правки тоже создаются через AI.",
+            "🌰 Выбери пакет генераций\n\n"
+            "1 генерация 🌰 — 350 ₽\n"
+            "2 генерации 🌰 — 500 ₽\n"
+            "3 генерации 🌰 — 600 ₽\n\n"
+            "В чеке ЮKassa будет указана услуга: персональная музыкальная колыбельная.",
             reply_markup=buy_keyboard()
         )
         return START
 
-    if text in LULLABY_PACKAGES:
+    if text in NUT_PACKAGES:
         context.user_data["pending_payment_package_key"] = text
 
         await update.message.reply_text(
@@ -1476,10 +1479,10 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return START
 
     if is_create_lullaby(text):
-        lullabies = get_lullabies(user_id)
+        nuts = get_nuts(user_id)
 
-        if lullabies < LULLABIES_PER_GENERATION:
-            await offer_buy_lullabies(update, user_id)
+        if nuts < NUTS_PER_GENERATION:
+            await offer_buy_nuts(update, user_id)
             return START
 
         context.user_data.clear()
@@ -1516,7 +1519,7 @@ async def payment_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     if is_back(text) or is_home(text):
         context.user_data.pop("pending_payment_package_key", None)
         await update.message.reply_text(
-            "💳 Выбери пакет колыбельных:",
+            "🌰 Выбери пакет генераций:",
             reply_markup=buy_keyboard()
         )
         return START
@@ -1531,10 +1534,10 @@ async def payment_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     package_key = context.user_data.get("pending_payment_package_key")
 
-    if package_key not in LULLABY_PACKAGES:
+    if package_key not in NUT_PACKAGES:
         await update.message.reply_text(
             "😔 Не нашла выбранный пакет.\n\n"
-            "Выбери пакет колыбельных ещё раз.",
+            "Выбери пакет генераций 🌰 ещё раз.",
             reply_markup=buy_keyboard()
         )
         return START
@@ -2100,12 +2103,9 @@ async def final_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
-    if not context.user_data.get("lullaby_credit_used"):
-        if not remove_lullabies(user_id, LULLABIES_PER_GENERATION):
-            await offer_buy_lullabies(update, user_id)
-            return START
-
-        context.user_data["lullaby_credit_used"] = True
+    if get_nuts(user_id) < NUTS_PER_GENERATION:
+        await offer_buy_nuts(update, user_id)
+        return START
 
     await update.message.reply_text(
         f"✨ {BRAND_NAME} сочиняет колыбельную и расставляет правильные ударения 🌙",
@@ -2136,13 +2136,9 @@ async def final_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as error:
         print("Ошибка OpenAI:", error)
 
-        if context.user_data.get("lullaby_credit_used"):
-            add_lullabies(update.effective_user.id, LULLABIES_PER_GENERATION)
-            context.user_data.pop("lullaby_credit_used", None)
-
         await update.message.reply_text(
             "😔 Не получилось создать текст колыбельной.\n\n"
-            "Иногда сервис отвечает слишком долго. Колыбельная вернулась на баланс, можно попробовать ещё раз.",
+            "Иногда сервис отвечает слишком долго. Можно попробовать ещё раз.",
             reply_markup=keyboard([
                 ["✨ Создать текст"],
                 ["✏️ Изменить данные"]
@@ -2315,10 +2311,10 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = context.user_data
 
-    if not data.get("lullaby_credit_used"):
+    if get_nuts(user_id) < NUTS_PER_GENERATION:
         await update.message.reply_text(
-            "🌙 Сначала нужно оплатить колыбельную и создать текст.",
-            reply_markup=main_menu_keyboard()
+            "🌙 Для создания музыки нужна 1 генерация 🌰.",
+            reply_markup=buy_keyboard()
         )
         return START
 
@@ -2359,12 +2355,11 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
         if not audio_urls:
-            add_lullabies(user_id, LULLABIES_PER_GENERATION)
             context.user_data.clear()
 
             await update.message.reply_text(
                 "😔 Музыкальная колыбельная пока не готова.\n\n"
-                "🌙 Колыбельная вернулась на баланс.\n\n"
+                "Генерация 🌰 не списана.\n\n"
                 "Можно попробовать создать музыку позже или зайти в личный кабинет.",
                 reply_markup=main_menu_keyboard()
             )
@@ -2394,14 +2389,16 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         os.remove(file_path)
 
-        balance = get_lullabies(user_id)
+        remove_nuts(user_id, NUTS_PER_GENERATION)
+        balance = get_nuts(user_id)
 
         context.user_data.clear()
 
         await update.message.reply_text(
             f"🌙 Всё готово!\n\n"
             f"Спасибо, что создали колыбельную в {BRAND_NAME} ✨\n\n"
-            f"🌙 Оплаченных колыбельных осталось: {balance}\n\n"
+            f"Списана 1 генерация 🌰\n"
+            f"Баланс: {balance} генераций 🌰\n\n"
             f"Можно создать новую колыбельную или зайти в личный кабинет.",
             reply_markup=main_menu_keyboard()
         )
@@ -2411,12 +2408,11 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as error:
         print("Ошибка Suno/музыки:", error)
 
-        add_lullabies(user_id, LULLABIES_PER_GENERATION)
         context.user_data.clear()
 
         await update.message.reply_text(
             "😔 Не получилось создать музыкальную колыбельную.\n\n"
-            "🌙 Колыбельная вернулась на баланс.\n\n"
+            "Генерация 🌰 не списана.\n\n"
             "Можно попробовать позже или зайти в личный кабинет.",
             reply_markup=main_menu_keyboard()
         )
