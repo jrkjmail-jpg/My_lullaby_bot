@@ -700,6 +700,10 @@ def clean_filename(text):
     return text.strip()[:80]
 
 
+def format_price(price):
+    return price[:-3] if price.endswith(".00") else price
+
+
 async def send_long_text(update: Update, text: str):
     max_length = 3500
     for i in range(0, len(text), max_length):
@@ -1376,14 +1380,14 @@ async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if not payment_url:
         await update.message.reply_text(
             "😔 ЮKassa не вернула ссылку на оплату.\n\n"
-            "Попробуй выбрать пакет ещё раз.",
+            "Попробуй выбрать количество орешков ещё раз.",
             reply_markup=buy_keyboard()
         )
         return
 
     await update.message.reply_text(
-        f"🌙 Пакет: {package['title']}\n"
-        f"💳 Стоимость: {package['price']} ₽\n\n"
+        f"🌰 Орешки: {package['title']}\n"
+        f"💳 Стоимость: 🔵 {format_price(package['price'])} ₽\n\n"
         f"Оплати по ссылке ЮKassa:\n{payment_url}\n\n"
         "После оплаты орешки начислятся автоматически, как только ЮKassa пришлёт подтверждение.",
         reply_markup=buy_keyboard()
@@ -1425,7 +1429,7 @@ async def offer_buy_nuts(update: Update, user_id):
         f"🌙 На балансе пока нет орешков.\n\n"
         f"Сейчас доступно: {nuts}\n"
         f"Для создания колыбельной нужен 1 орешек.\n\n"
-        f"Выбери пакет, и после оплаты можно будет сразу начать создание.",
+        f"Выбери количество орешков, и после оплаты можно будет сразу начать создание.",
         reply_markup=buy_keyboard()
     )
 
@@ -1453,18 +1457,17 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 Личный кабинет\n\n"
             f"🌰 Твой баланс: {nuts} орешков\n\n"
             f"1 орешек = 1 персональная музыкальная колыбельная.\n\n"
-            f"Здесь можно купить пакет или сразу создать новую колыбельную 🌙",
+            f"Здесь можно купить орешки или сразу создать новую колыбельную 🌙",
             reply_markup=profile_keyboard()
         )
         return START
 
     if text == "🌰 Купить орешки":
         await update.message.reply_text(
-            "🌰 Выбери пакет орешков\n\n"
-            "1 орешек — 349 ₽\n"
-            "2 орешка — 499 ₽\n"
-            "3 орешка — 599 ₽\n\n"
-            "В чеке ЮKassa будет указана услуга: персональная музыкальная колыбельная.",
+            "🌰 Выбери количество орешков\n\n"
+            "1 орешек — 🔵 349 ₽\n"
+            "2 орешка — 🔵 499 ₽\n"
+            "3 орешка — 🔵 599 ₽",
             reply_markup=buy_keyboard()
         )
         return START
@@ -1519,7 +1522,7 @@ async def payment_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     if is_back(text) or is_home(text):
         context.user_data.pop("pending_payment_package_key", None)
         await update.message.reply_text(
-            "🌰 Выбери пакет орешков:",
+            "🌰 Выбери количество орешков:",
             reply_markup=buy_keyboard()
         )
         return START
@@ -1536,8 +1539,8 @@ async def payment_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if package_key not in NUT_PACKAGES:
         await update.message.reply_text(
-            "😔 Не нашла выбранный пакет.\n\n"
-            "Выбери пакет орешков ещё раз.",
+            "😔 Не нашла выбранное количество орешков.\n\n"
+            "Выбери количество орешков ещё раз.",
             reply_markup=buy_keyboard()
         )
         return START
