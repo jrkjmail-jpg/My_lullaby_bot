@@ -40,6 +40,11 @@ YOOKASSA_WEBHOOK_HOST = os.getenv("YOOKASSA_WEBHOOK_HOST", "0.0.0.0")
 YOOKASSA_WEBHOOK_PORT = int(os.getenv("YOOKASSA_WEBHOOK_PORT", "8080"))
 YOOKASSA_WEBHOOK_PATH = os.getenv("YOOKASSA_WEBHOOK_PATH", "/yookassa-webhook")
 YOOKASSA_TEST_MODE = os.getenv("YOOKASSA_TEST_MODE", "").lower() in ("1", "true", "yes", "да")
+ADMIN_IDS = {
+    int(user_id.strip())
+    for user_id in os.getenv("ADMIN_IDS", "").split(",")
+    if user_id.strip().isdigit()
+}
 
 OPENAI_CLIENT = None
 TELEGRAM_EVENT_LOOP = None
@@ -100,13 +105,19 @@ BAD_WORDS = [
 ]
 
 UNSAFE_CHILD_TOPICS = [
-    "алкоголь", "водка", "вино", "пиво", "бар", "клуб", "тусовка",
-    "наркотик", "наркотики", "трава", "кокаин", "героин", "меф",
+    "алкоголь", "водка", "вино", "пиво", "бар", "тусовка",
+    "наркотик", "наркотики", "кокаин", "героин", "меф",
     "стрельба", "стрелять", "оружие", "пистолет", "автомат", "нож",
     "война", "бомба", "взрыв", "убийство", "убить", "кровь",
-    "смерть", "ужас", "страх", "монстр", "демон", "ад",
+    "смерть", "ужас", "страх", "демон", "ад",
     "секс", "эротика", "порно",
     "казино", "ставки", "азарт",
+]
+
+UNSAFE_CHILD_PHRASES = [
+    "ночной клуб",
+    "алкогольный бар",
+    "взрослая тусовка",
 ]
 
 RUSSIAN_VOWELS_UPPER = "АЕЁИОУЫЭЮЯ"
@@ -261,6 +272,14 @@ def create_user_if_not_exists(user):
             INSERT OR IGNORE INTO users (user_id, username, nuts)
             VALUES (?, ?, 0)
         """, (user.id, user.username))
+
+
+def create_user_id_if_not_exists(user_id):
+    with db_connection() as conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO users (user_id, username, nuts)
+            VALUES (?, NULL, 0)
+        """, (user_id,))
 
 
 def get_nuts(user_id):
@@ -462,7 +481,10 @@ def has_bad_words(text):
 
 def find_unsafe_topics(text):
     low = text.lower()
-    return [word for word in UNSAFE_CHILD_TOPICS if word in low]
+    words = set(re.findall(r"[а-яёa-z]+", low))
+    found = [word for word in UNSAFE_CHILD_TOPICS if word in words]
+    found.extend(phrase for phrase in UNSAFE_CHILD_PHRASES if phrase in low)
+    return found
 
 
 def validate_child_safe_text(text):
@@ -712,15 +734,15 @@ async def send_long_text(update: Update, text: str):
 
 
 CREATE_TEXT_WAIT_MESSAGES = [
-    (5, "🐿️ Колыбелка подбирает самые нежные слова 🌙"),
-    (10, "✨ Песенка уже складывается в мягкий ритм 🎵"),
-    (15, "🌙 Почти готово... проверяю, чтобы всё звучало красиво"),
-    (20, "🐿️ Колыбелка чуть задумалась, сейчас всё аккуратно допоёт ✨"),
+    (5, "🐿️ Колыбелка подбирает самые нежные слова для текста 🌙"),
+    (10, "✨ Текст складывается в мягкий ритм"),
+    (15, "🌙 Почти готово... проверяю строки и ударения"),
+    (20, "🐿️ Колыбелка ещё немного шлифует текст ✨"),
 ]
 
 EDIT_TEXT_WAIT_MESSAGES = [
-    (5, "✏️ Колыбелка уже вносит правки и бережёт нежный ритм 🌙"),
-    (10, "✨ Ещё немного... подправляю строки, чтобы песня звучала мягче 🎵"),
+    (5, "✏️ Колыбелка уже вносит правки в текст 🌙"),
+    (10, "✨ Ещё немного... подправляю строки, чтобы текст звучал мягче"),
     (15, "🌙 Почти готово... проверяю новые слова и окончания"),
     (20, "🐿️ Колыбелка внимательно перечитывает текст, чтобы всё было красиво ✨"),
 ]
@@ -2121,7 +2143,8 @@ async def final_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return START
 
     await update.message.reply_text(
-        f"✨ {BRAND_NAME} сочиняет колыбельную и расставляет правильные ударения 🌙",
+        f"✨ {BRAND_NAME} создаёт текст колыбельной и расставляет правильные ударения 🌙\n\n"
+        f"Обычно это занимает 1-2 минуты.",
         reply_markup=generation_wait_keyboard()
     )
 
@@ -2335,7 +2358,8 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"🎵 {BRAND_NAME} создаёт музыкальную колыбельную...\n\n"
-        f"Сейчас текст превратится в нежную песню для сна 🌙",
+        f"Сейчас текст превратится в нежную песню для сна 🌙\n\n"
+        f"Обычно это занимает 3-5 минут.",
         reply_markup=generation_wait_keyboard()
     )
 
@@ -2456,6 +2480,80 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return START
 
 
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    create_user_if_not_exists(update.effective_user)
+    nuts = get_nuts(update.effective_user.id)
+
+    await update.message.reply_text(
+        f"🌰 Твой баланс: {nuts} орешков\n\n"
+        f"1 орешек = 1 персональная музыкальная колыбельная",
+        reply_markup=profile_keyboard()
+    )
+
+
+async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    username = update.effective_user.username or "без username"
+
+    await update.message.reply_text(
+        f"👤 Твой Telegram ID:\n{update.effective_user.id}\n\n"
+        f"Username: @{username}"
+    )
+
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+
+async def addnuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "🌰 Формат команды:\n"
+            "/addnuts user_id количество\n\n"
+            "Например:\n"
+            "/addnuts 123456789 1"
+        )
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("🌙 user_id и количество должны быть числами.")
+        return
+
+    if amount <= 0 or amount > 100:
+        await update.message.reply_text("🌙 Количество орешков должно быть от 1 до 100.")
+        return
+
+    create_user_id_if_not_exists(target_user_id)
+    add_nuts(target_user_id, amount)
+    balance = get_nuts(target_user_id)
+
+    await update.message.reply_text(
+        "✅ Орешки начислены вручную.\n\n"
+        f"Пользователь: {target_user_id}\n"
+        f"Начислено: {amount}\n"
+        f"Баланс: {balance}"
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "✅ Орешки начислены!\n\n"
+                f"🌰 Начислено: {amount} орешков\n"
+                f"Текущий баланс: {balance} орешков"
+            ),
+            reply_markup=profile_keyboard()
+        )
+    except Exception as error:
+        print("Не удалось уведомить пользователя о ручном начислении:", error)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     print("⚠️ Ошибка Telegram/сети:", context.error)
 
@@ -2535,6 +2633,9 @@ def main():
     )
 
     app.add_handler(conversation)
+    app.add_handler(CommandHandler("balance", balance_command))
+    app.add_handler(CommandHandler("myid", myid_command))
+    app.add_handler(CommandHandler("addnuts", addnuts_command))
     app.add_error_handler(error_handler)
 
     if yookassa_is_configured():

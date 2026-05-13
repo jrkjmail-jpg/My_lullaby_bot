@@ -96,6 +96,18 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertEqual(repeated_result["action"], "already_credited")
         self.assertEqual(bot.get_nuts(user.id), 3)
 
+    def test_child_safety_allows_good_ambiguous_characters(self):
+        safe, message = bot.validate_child_safe_text("Алладин и добрый джин")
+
+        self.assertTrue(safe)
+        self.assertEqual(message, "")
+
+    def test_child_safety_blocks_clear_adult_topics(self):
+        safe, message = bot.validate_child_safe_text("песня про алкоголь и казино")
+
+        self.assertFalse(safe)
+        self.assertIn("не подходит", message)
+
 
 if __name__ == "__main__":
     unittest.main()
