@@ -39,6 +39,7 @@ YOOKASSA_TAX_SYSTEM_CODE = os.getenv("YOOKASSA_TAX_SYSTEM_CODE")
 YOOKASSA_WEBHOOK_HOST = os.getenv("YOOKASSA_WEBHOOK_HOST", "0.0.0.0")
 YOOKASSA_WEBHOOK_PORT = int(os.getenv("YOOKASSA_WEBHOOK_PORT", "8080"))
 YOOKASSA_WEBHOOK_PATH = os.getenv("YOOKASSA_WEBHOOK_PATH", "/yookassa-webhook")
+YOOKASSA_TEST_MODE = os.getenv("YOOKASSA_TEST_MODE", "").lower() in ("1", "true", "yes", "да")
 
 OPENAI_CLIENT = None
 TELEGRAM_EVENT_LOOP = None
@@ -1116,6 +1117,13 @@ def yookassa_is_configured():
     return bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
 
 
+def yookassa_test_notice():
+    if not YOOKASSA_TEST_MODE:
+        return ""
+
+    return "🧪 Тестовая оплата ЮKassa. Реальные деньги не списываются.\n\n"
+
+
 def create_yookassa_payment(user_id, package_key, customer_email):
     package = NUT_PACKAGES[package_key]
     local_payment_id = create_local_payment_order(user_id, package_key, customer_email)
@@ -1135,6 +1143,7 @@ def create_yookassa_payment(user_id, package_key, customer_email):
             "local_payment_id": local_payment_id,
             "user_id": str(user_id),
             "nuts": str(package["nuts"]),
+            "test_mode": "true" if YOOKASSA_TEST_MODE else "false",
         },
         "receipt": {
             "customer": {
@@ -1386,6 +1395,7 @@ async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
 
     await update.message.reply_text(
+        yookassa_test_notice() +
         f"🌰 Орешки: {package['title']}\n"
         f"💳 Стоимость: 🔵 {format_price(package['price'])} ₽\n\n"
         f"Оплати по ссылке ЮKassa:\n{payment_url}\n\n"
@@ -2472,6 +2482,8 @@ def main():
 
     if not yookassa_is_configured():
         print("ЮKassa не настроена: бот запустится, но оплата будет временно недоступна")
+    elif YOOKASSA_TEST_MODE:
+        print("ЮKassa работает в тестовом режиме")
 
     app = (
         Application.builder()
