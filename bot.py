@@ -101,6 +101,137 @@ def migrate_existing_db_to_persistent_path():
         print("Не удалось перенести SQLite базу в постоянное хранилище:", error)
 
 
+def read_legacy_db_rows(db_path, table_name):
+    if not os.path.exists(db_path):
+        return []
+
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(f"SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table_name,))
+
+        if not cur.fetchone():
+            return []
+
+        return [dict(row) for row in cur.execute(f"SELECT * FROM {table_name}").fetchall()]
+    except sqlite3.Error as error:
+        print(f"Не удалось прочитать старую SQLite таблицу {table_name}:", error)
+        return []
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+
+def merge_legacy_db_into_current_db():
+    old_db_path = os.path.join(BASE_DIR, "kolybelka.db")
+
+    if os.path.abspath(DB_PATH) == os.path.abspath(old_db_path):
+        return
+
+    if not os.path.exists(old_db_path):
+        return
+
+    legacy_users = read_legacy_db_rows(old_db_path, "users")
+    legacy_payments = read_legacy_db_rows(old_db_path, "payments")
+
+    if not legacy_users and not legacy_payments:
+        return
+
+    imported_users = 0
+    imported_payments = 0
+
+    with db_connection() as conn:
+        for user in legacy_users:
+            user_id = user.get("user_id")
+
+            if user_id is None:
+                continue
+
+            cur = conn.execute("""
+                INSERT OR IGNORE INTO users (
+                    user_id, username, nuts, lullabies, last_seen_at,
+                    last_lullaby_at, reminders_enabled, last_reminder_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id,
+                user.get("username"),
+                user.get("nuts", 0) or 0,
+                user.get("lullabies", 0) or 0,
+                user.get("last_seen_at"),
+                user.get("last_lullaby_at"),
+                user.get("reminders_enabled", 1),
+                user.get("last_reminder_at"),
+            ))
+
+            if cur.rowcount:
+                imported_users += 1
+            else:
+                conn.execute("""
+                    UPDATE users
+                    SET username = COALESCE(username, ?),
+                        nuts = MAX(nuts, ?),
+                        lullabies = MAX(lullabies, ?),
+                        last_seen_at = COALESCE(last_seen_at, ?),
+                        last_lullaby_at = COALESCE(last_lullaby_at, ?),
+                        reminders_enabled = COALESCE(reminders_enabled, ?),
+                        last_reminder_at = COALESCE(last_reminder_at, ?)
+                    WHERE user_id = ?
+                """, (
+                    user.get("username"),
+                    user.get("nuts", 0) or 0,
+                    user.get("lullabies", 0) or 0,
+                    user.get("last_seen_at"),
+                    user.get("last_lullaby_at"),
+                    user.get("reminders_enabled", 1),
+                    user.get("last_reminder_at"),
+                    user_id,
+                ))
+
+        for payment in legacy_payments:
+            local_payment_id = payment.get("local_payment_id")
+
+            if not local_payment_id or payment.get("user_id") is None:
+                continue
+
+            cur = conn.execute("""
+                INSERT OR IGNORE INTO payments (
+                    local_payment_id, yookassa_payment_id, user_id, package_key,
+                    package_title, nuts, lullabies, amount_value, currency, status,
+                    confirmation_url, customer_email, credited, created_at, paid_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                local_payment_id,
+                payment.get("yookassa_payment_id"),
+                payment.get("user_id"),
+                payment.get("package_key", ""),
+                payment.get("package_title", ""),
+                payment.get("nuts", 0) or 0,
+                payment.get("lullabies", 0) or 0,
+                payment.get("amount_value", "0.00"),
+                payment.get("currency", "RUB"),
+                payment.get("status", "created"),
+                payment.get("confirmation_url"),
+                payment.get("customer_email"),
+                payment.get("credited", 0) or 0,
+                payment.get("created_at"),
+                payment.get("paid_at"),
+            ))
+
+            if cur.rowcount:
+                imported_payments += 1
+
+    if imported_users or imported_payments:
+        print(
+            "SQLite база объединена со старой базой: "
+            f"пользователей {imported_users}, платежей {imported_payments}"
+        )
+
+
 def ensure_persistence_dir():
     os.makedirs(os.path.dirname(os.path.abspath(PERSISTENCE_PATH)), exist_ok=True)
 
@@ -3186,12 +3317,19 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     all_user_ids = get_all_user_ids()
     reminder_user_ids = get_users_for_reminder()
+    legacy_db_path = os.path.join(BASE_DIR, "kolybelka.db")
+    legacy_users_count = 0
+
+    if os.path.abspath(DB_PATH) != os.path.abspath(legacy_db_path):
+        legacy_users_count = len(read_legacy_db_rows(legacy_db_path, "users"))
 
     await update.message.reply_text(
         "👥 Пользователи бота\n\n"
         f"Всего в базе: {len(all_user_ids)}\n"
         f"Подходят для мягкого напоминания сейчас: {len(reminder_user_ids)}\n\n"
-        "Если в базе 0 пользователей, рассылка технически работает, но отправлять её некому."
+        f"Текущая SQLite база: {DB_PATH}\n"
+        f"Пользователей в старой базе рядом с bot.py: {legacy_users_count}\n\n"
+        "Если в текущей базе 0 пользователей, рассылка технически работает, но отправлять её некому."
     )
 
 
@@ -3214,6 +3352,11 @@ async def startreminders_command(update: Update, context: ContextTypes.DEFAULT_T
         "🌙 Готово, мягкие напоминания снова включены.",
         reply_markup=main_menu_keyboard()
     )
+
+
+async def track_user_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user:
+        create_user_if_not_exists(update.effective_user)
 
 
 async def myid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3390,6 +3533,8 @@ def main():
     migrate_existing_db_to_persistent_path()
     ensure_persistence_dir()
     init_db()
+    merge_legacy_db_into_current_db()
+    init_db()
 
     if not TELEGRAM_TOKEN:
         print("Ошибка: TELEGRAM_TOKEN не найден")
@@ -3476,6 +3621,7 @@ def main():
         allow_reentry=True,
     )
 
+    app.add_handler(MessageHandler(filters.ALL, track_user_activity), group=-2)
     app.add_handler(conversation)
     app.add_handler(CommandHandler("balance", balance_command), group=-1)
     app.add_handler(CommandHandler("myid", myid_command), group=-1)
