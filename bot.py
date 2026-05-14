@@ -3179,6 +3179,22 @@ async def remindnow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    all_user_ids = get_all_user_ids()
+    reminder_user_ids = get_users_for_reminder()
+
+    await update.message.reply_text(
+        "👥 Пользователи бота\n\n"
+        f"Всего в базе: {len(all_user_ids)}\n"
+        f"Подходят для мягкого напоминания сейчас: {len(reminder_user_ids)}\n\n"
+        "Если в базе 0 пользователей, рассылка технически работает, но отправлять её некому."
+    )
+
+
 async def stopreminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     create_user_if_not_exists(update.effective_user)
     set_reminders_enabled(update.effective_user.id, False)
@@ -3461,15 +3477,16 @@ def main():
     )
 
     app.add_handler(conversation)
-    app.add_handler(CommandHandler("balance", balance_command))
-    app.add_handler(CommandHandler("myid", myid_command))
-    app.add_handler(CommandHandler("broadcast", broadcast_command))
-    app.add_handler(CommandHandler("maintenance", maintenance_command))
-    app.add_handler(CommandHandler("remindnow", remindnow_command))
-    app.add_handler(CommandHandler("stopreminders", stopreminders_command))
-    app.add_handler(CommandHandler("startreminders", startreminders_command))
-    app.add_handler(CommandHandler("addnuts", addnuts_command))
-    app.add_handler(CommandHandler("removenuts", removenuts_command))
+    app.add_handler(CommandHandler("balance", balance_command), group=-1)
+    app.add_handler(CommandHandler("myid", myid_command), group=-1)
+    app.add_handler(CommandHandler("broadcast", broadcast_command), group=-1)
+    app.add_handler(CommandHandler("maintenance", maintenance_command), group=-1)
+    app.add_handler(CommandHandler("remindnow", remindnow_command), group=-1)
+    app.add_handler(CommandHandler("users", users_command), group=-1)
+    app.add_handler(CommandHandler("stopreminders", stopreminders_command), group=-1)
+    app.add_handler(CommandHandler("startreminders", startreminders_command), group=-1)
+    app.add_handler(CommandHandler("addnuts", addnuts_command), group=-1)
+    app.add_handler(CommandHandler("removenuts", removenuts_command), group=-1)
     app.add_error_handler(error_handler)
 
     if yookassa_is_configured():
