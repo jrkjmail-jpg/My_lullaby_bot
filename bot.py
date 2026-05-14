@@ -505,6 +505,15 @@ def init_db():
             )
         """)
 
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS storage_probe (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                token TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                checked_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         ensure_column(cur, "users", "lullabies", "INTEGER DEFAULT 0")
         ensure_column(cur, "users", "last_seen_at", "TEXT")
         ensure_column(cur, "users", "last_lullaby_at", "TEXT")
@@ -630,6 +639,60 @@ def get_database_stats():
         "db_path_in_project_dir": is_db_path_in_project_dir(),
         "db_path_in_shared_dir": is_db_path_in_shared_dir(),
         "db_persistence_warning": get_db_persistence_warning(),
+    }
+
+
+def get_or_create_storage_probe():
+    db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+    probe_file_path = os.path.join(db_dir, "kolybelka_storage_probe.txt")
+
+    with db_connection() as conn:
+        row = conn.execute("""
+            SELECT token, created_at
+            FROM storage_probe
+            WHERE id = 1
+        """).fetchone()
+
+        if row:
+            token, created_at = row
+            conn.execute("""
+                UPDATE storage_probe
+                SET checked_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+            """)
+        else:
+            token = uuid.uuid4().hex
+            conn.execute("""
+                INSERT INTO storage_probe (id, token)
+                VALUES (1, ?)
+            """, (token,))
+            created_at = conn.execute("""
+                SELECT created_at
+                FROM storage_probe
+                WHERE id = 1
+            """).fetchone()[0]
+
+    file_token = None
+    file_error = None
+
+    try:
+        if os.path.exists(probe_file_path):
+            with open(probe_file_path, "r", encoding="utf-8") as file:
+                file_token = file.read().strip()
+        else:
+            with open(probe_file_path, "w", encoding="utf-8") as file:
+                file.write(token)
+            file_token = token
+    except OSError as error:
+        file_error = str(error)
+
+    return {
+        "db_token": token,
+        "db_created_at": created_at,
+        "probe_file_path": probe_file_path,
+        "file_token": file_token,
+        "file_error": file_error,
+        "tokens_match": file_token == token,
     }
 
 
@@ -3764,6 +3827,36 @@ async def dbstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def storagecheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    stats = get_database_stats()
+    probe = get_or_create_storage_probe()
+
+    if probe["file_error"]:
+        file_status = f"ошибка записи/чтения: {probe['file_error']}"
+    elif probe["tokens_match"]:
+        file_status = "файл проверки совпадает с SQLite"
+    else:
+        file_status = "⚠️ файл проверки не совпадает с SQLite"
+
+    await update.message.reply_text(
+        "🧪 Проверка постоянного хранилища\n\n"
+        f"SQLite база: {stats['db_path']}\n"
+        f"Файл проверки: {probe['probe_file_path']}\n"
+        f"Токен SQLite: {probe['db_token']}\n"
+        f"Токен файла: {probe['file_token'] or 'нет'}\n"
+        f"Создано в SQLite: {probe['db_created_at']}\n"
+        f"Статус файла: {file_status}\n\n"
+        f"{stats['db_persistence_warning']}\n\n"
+        "Как проверить: запусти /storagecheck, потом обнови бота с Git и перезапусти. "
+        "После этого снова запусти /storagecheck. Если токен изменился или файл пропал, "
+        "хранилище не постоянное, и орешки будут сбрасываться."
+    )
+
+
 async def stopreminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     create_user_if_not_exists(update.effective_user)
     set_reminders_enabled(update.effective_user.id, False)
@@ -4071,6 +4164,7 @@ def main():
     app.add_handler(CommandHandler("remindpreview", remindpreview_command), group=-1)
     app.add_handler(CommandHandler("users", users_command), group=-1)
     app.add_handler(CommandHandler("dbstatus", dbstatus_command), group=-1)
+    app.add_handler(CommandHandler("storagecheck", storagecheck_command), group=-1)
     app.add_handler(CommandHandler("stopreminders", stopreminders_command), group=-1)
     app.add_handler(CommandHandler("startreminders", startreminders_command), group=-1)
     app.add_handler(CommandHandler("addnuts", addnuts_command), group=-1)
