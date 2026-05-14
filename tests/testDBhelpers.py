@@ -96,6 +96,90 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertEqual(repeated_result["action"], "already_credited")
         self.assertEqual(bot.get_nuts(user.id), 3)
 
+    def test_yookassa_webhook_recovers_missing_local_order(self):
+        user_id = 1004
+        local_payment_id = "nuts_recovered"
+
+        payload = {
+            "type": "notification",
+            "event": "payment.succeeded",
+            "object": {
+                "id": "yk_payment_recovered",
+                "status": "succeeded",
+                "paid": True,
+            },
+        }
+
+        with patch("bot.get_yookassa_payment") as get_yookassa_payment:
+            get_yookassa_payment.return_value = {
+                "id": "yk_payment_recovered",
+                "status": "succeeded",
+                "paid": True,
+                "amount": {
+                    "value": "499.00",
+                    "currency": "RUB",
+                },
+                "metadata": {
+                    "local_payment_id": local_payment_id,
+                    "user_id": str(user_id),
+                    "nuts": "2",
+                },
+            }
+
+            result = bot.process_yookassa_webhook(payload)
+            repeated_result = bot.process_yookassa_webhook(payload)
+
+        self.assertEqual(result["action"], "credited")
+        self.assertEqual(repeated_result["action"], "already_credited")
+        self.assertEqual(bot.get_nuts(user_id), 2)
+
+    def test_yookassa_webhook_missing_order_does_not_raise(self):
+        payload = {
+            "type": "notification",
+            "event": "payment.succeeded",
+            "object": {
+                "id": "yk_payment_without_metadata",
+                "status": "succeeded",
+                "paid": True,
+            },
+        }
+
+        with patch("bot.get_yookassa_payment") as get_yookassa_payment:
+            get_yookassa_payment.return_value = {
+                "id": "yk_payment_without_metadata",
+                "status": "succeeded",
+                "paid": True,
+            }
+
+            result = bot.process_yookassa_webhook(payload)
+
+        self.assertEqual(result["action"], "missing_order")
+        self.assertEqual(result["yookassa_payment_id"], "yk_payment_without_metadata")
+
+    def test_reminders_skip_recent_and_disabled_users(self):
+        bot.create_user_id_if_not_exists(2001)
+        bot.create_user_id_if_not_exists(2002)
+        bot.create_user_id_if_not_exists(2003)
+        bot.set_reminders_enabled(2003, False)
+
+        with bot.db_connection() as conn:
+            conn.execute("""
+                UPDATE users
+                SET last_seen_at = datetime('now', '-20 days')
+                WHERE user_id IN (2001, 2003)
+            """)
+            conn.execute("""
+                UPDATE users
+                SET last_seen_at = CURRENT_TIMESTAMP
+                WHERE user_id = 2002
+            """)
+
+        self.assertEqual(bot.get_users_for_reminder(), [2001])
+
+        bot.mark_reminder_sent(2001)
+
+        self.assertEqual(bot.get_users_for_reminder(), [])
+
     def test_child_safety_allows_good_ambiguous_characters(self):
         safe, message = bot.validate_child_safe_text("Алладин и добрый джин")
 

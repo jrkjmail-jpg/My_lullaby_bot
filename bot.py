@@ -7,6 +7,8 @@ import asyncio
 import tempfile
 import requests
 import threading
+import shutil
+import time
 from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,6 +23,7 @@ from telegram.ext import (
     MessageHandler,
     ConversationHandler,
     ContextTypes,
+    PicklePersistence,
     filters,
 )
 
@@ -48,11 +51,58 @@ ADMIN_IDS = {
 
 OPENAI_CLIENT = None
 TELEGRAM_EVENT_LOOP = None
+REMINDER_TASK = None
 SUNO_BASE_URL = "https://api.sunoapi.org"
 YOOKASSA_BASE_URL = "https://api.yookassa.ru/v3"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "kolybelka.db"))
+
+
+def get_default_db_path():
+    shared_dir = os.getenv("SHARED_DIR")
+
+    if shared_dir:
+        return os.path.join(shared_dir, "kolybelka.db")
+
+    bot_host_shared_dir = "/app/shared"
+
+    if os.path.isdir(bot_host_shared_dir):
+        return os.path.join(bot_host_shared_dir, "kolybelka.db")
+
+    return os.path.join(BASE_DIR, "kolybelka.db")
+
+
+DB_PATH = os.getenv("DB_PATH", get_default_db_path())
+PERSISTENCE_PATH = os.getenv(
+    "PERSISTENCE_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "kolybelka_state.pkl")
+)
+TEXT_GENERATION_TIMEOUT_SECONDS = int(os.getenv("TEXT_GENERATION_TIMEOUT_SECONDS", "300"))
+MUSIC_GENERATION_TIMEOUT_SECONDS = int(os.getenv("MUSIC_GENERATION_TIMEOUT_SECONDS", "900"))
+REMINDERS_ENABLED = os.getenv("REMINDERS_ENABLED", "1").lower() in ("1", "true", "yes", "да")
+REMINDER_AFTER_DAYS = int(os.getenv("REMINDER_AFTER_DAYS", "14"))
+REMINDER_INTERVAL_HOURS = int(os.getenv("REMINDER_INTERVAL_HOURS", "24"))
+
+
+def migrate_existing_db_to_persistent_path():
+    old_db_path = os.path.join(BASE_DIR, "kolybelka.db")
+
+    if os.path.abspath(DB_PATH) == os.path.abspath(old_db_path):
+        return
+
+    if not os.path.exists(old_db_path) or os.path.exists(DB_PATH):
+        return
+
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
+        shutil.copy2(old_db_path, DB_PATH)
+        print(f"SQLite база перенесена в постоянное хранилище: {DB_PATH}")
+    except OSError as error:
+        print("Не удалось перенести SQLite базу в постоянное хранилище:", error)
+
+
+def ensure_persistence_dir():
+    os.makedirs(os.path.dirname(os.path.abspath(PERSISTENCE_PATH)), exist_ok=True)
 
 MAX_EDITS = 5
 NUTS_PER_GENERATION = 1
@@ -198,6 +248,7 @@ def text_review_keyboard():
 def create_music_keyboard():
     return keyboard([
         ["🎵 Создать музыку"],
+        ["🏠 Главное меню"],
     ])
 
 
@@ -231,7 +282,11 @@ def init_db():
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 nuts INTEGER DEFAULT 0,
-                lullabies INTEGER DEFAULT 0
+                lullabies INTEGER DEFAULT 0,
+                last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_lullaby_at TEXT,
+                reminders_enabled INTEGER NOT NULL DEFAULT 1,
+                last_reminder_at TEXT
             )
         """)
 
@@ -256,8 +311,18 @@ def init_db():
         """)
 
         ensure_column(cur, "users", "lullabies", "INTEGER DEFAULT 0")
+        ensure_column(cur, "users", "last_seen_at", "TEXT")
+        ensure_column(cur, "users", "last_lullaby_at", "TEXT")
+        ensure_column(cur, "users", "reminders_enabled", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(cur, "users", "last_reminder_at", "TEXT")
         ensure_column(cur, "payments", "lullabies", "INTEGER DEFAULT 0")
         ensure_column(cur, "payments", "customer_email", "TEXT")
+
+        cur.execute("""
+            UPDATE users
+            SET last_seen_at = CURRENT_TIMESTAMP
+            WHERE last_seen_at IS NULL
+        """)
 
 
 def ensure_column(cur, table_name, column_name, column_definition):
@@ -276,6 +341,12 @@ def create_user_if_not_exists(user):
             INSERT OR IGNORE INTO users (user_id, username, nuts)
             VALUES (?, ?, 0)
         """, (user.id, user.username))
+        conn.execute("""
+            UPDATE users
+            SET username = ?,
+                last_seen_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+        """, (user.username, user.id))
 
 
 def create_user_id_if_not_exists(user_id):
@@ -283,6 +354,67 @@ def create_user_id_if_not_exists(user_id):
         conn.execute("""
             INSERT OR IGNORE INTO users (user_id, username, nuts)
             VALUES (?, NULL, 0)
+        """, (user_id,))
+
+
+def mark_lullaby_created(user_id):
+    with db_connection() as conn:
+        conn.execute("""
+            UPDATE users
+            SET last_lullaby_at = CURRENT_TIMESTAMP,
+                last_seen_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+        """, (user_id,))
+
+
+def set_reminders_enabled(user_id, enabled):
+    create_user_id_if_not_exists(user_id)
+
+    with db_connection() as conn:
+        conn.execute("""
+            UPDATE users
+            SET reminders_enabled = ?
+            WHERE user_id = ?
+        """, (1 if enabled else 0, user_id))
+
+
+def get_all_user_ids():
+    with db_connection() as conn:
+        rows = conn.execute("""
+            SELECT user_id
+            FROM users
+            ORDER BY user_id
+        """).fetchall()
+
+    return [row[0] for row in rows]
+
+
+def get_users_for_reminder():
+    with db_connection() as conn:
+        rows = conn.execute("""
+            SELECT user_id
+            FROM users
+            WHERE reminders_enabled = 1
+              AND COALESCE(last_lullaby_at, last_seen_at, '1970-01-01 00:00:00') <= datetime('now', ?)
+              AND (
+                    last_reminder_at IS NULL
+                    OR last_reminder_at <= datetime('now', ?)
+                  )
+            ORDER BY last_reminder_at IS NOT NULL, last_lullaby_at IS NOT NULL, user_id
+        """, (
+            f"-{REMINDER_AFTER_DAYS} days",
+            f"-{REMINDER_INTERVAL_HOURS} hours",
+        )).fetchall()
+
+    return [row[0] for row in rows]
+
+
+def mark_reminder_sent(user_id):
+    with db_connection() as conn:
+        conn.execute("""
+            UPDATE users
+            SET last_reminder_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
         """, (user_id,))
 
 
@@ -400,6 +532,103 @@ def mark_payment_status_by_yookassa_id(yookassa_payment_id, status):
             SET status = ?
             WHERE yookassa_payment_id = ?
         """, (status, yookassa_payment_id))
+
+
+def make_nuts_title(nuts):
+    if 10 <= nuts % 100 <= 20:
+        suffix = "орешков"
+    elif nuts % 10 == 1:
+        suffix = "орешек"
+    elif 2 <= nuts % 10 <= 4:
+        suffix = "орешка"
+    else:
+        suffix = "орешков"
+
+    return f"{nuts} {suffix}"
+
+
+def get_package_info_by_nuts(nuts):
+    for package_key, package in NUT_PACKAGES.items():
+        if package["nuts"] == nuts:
+            return package_key, package["title"]
+
+    title = make_nuts_title(nuts)
+    return title, title
+
+
+def recover_payment_order_from_yookassa(confirmed_payment, fallback_local_payment_id=None):
+    yookassa_payment_id = confirmed_payment.get("id")
+    metadata = confirmed_payment.get("metadata") or {}
+    local_payment_id = metadata.get("local_payment_id") or fallback_local_payment_id
+
+    if not yookassa_payment_id or not local_payment_id:
+        return None
+
+    try:
+        user_id = int(metadata.get("user_id"))
+        nuts = int(metadata.get("nuts"))
+    except (TypeError, ValueError):
+        return None
+
+    if nuts <= 0:
+        return None
+
+    amount = confirmed_payment.get("amount") or {}
+    amount_value = amount.get("value") or "0.00"
+    currency = amount.get("currency") or "RUB"
+    package_key, package_title = get_package_info_by_nuts(nuts)
+
+    create_user_id_if_not_exists(user_id)
+
+    with db_connection() as conn:
+        row = conn.execute("""
+            SELECT local_payment_id, yookassa_payment_id
+            FROM payments
+            WHERE local_payment_id = ? OR yookassa_payment_id = ?
+            LIMIT 1
+        """, (local_payment_id, yookassa_payment_id)).fetchone()
+
+        if row:
+            existing_local_payment_id, existing_yookassa_payment_id = row
+
+            if existing_yookassa_payment_id and existing_yookassa_payment_id != yookassa_payment_id:
+                return None
+
+            conn.execute("""
+                UPDATE payments
+                SET yookassa_payment_id = ?,
+                    status = 'succeeded',
+                    amount_value = ?,
+                    currency = ?
+                WHERE local_payment_id = ?
+            """, (
+                yookassa_payment_id,
+                amount_value,
+                currency,
+                existing_local_payment_id,
+            ))
+
+            return existing_local_payment_id
+
+        conn.execute("""
+            INSERT INTO payments (
+                local_payment_id, yookassa_payment_id, user_id, package_key,
+                package_title, nuts, lullabies, amount_value, currency,
+                status, credited, paid_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 'succeeded', 0, CURRENT_TIMESTAMP)
+        """, (
+            local_payment_id,
+            yookassa_payment_id,
+            user_id,
+            package_key,
+            package_title,
+            nuts,
+            amount_value,
+            currency,
+        ))
+
+    return local_payment_id
 
 
 def credit_payment_if_needed(local_payment_id, yookassa_payment_id):
@@ -737,6 +966,10 @@ def format_price(price):
     return price[:-3] if price.endswith(".00") else price
 
 
+def seconds_left(started_at, max_seconds):
+    return max_seconds - (time.monotonic() - started_at)
+
+
 async def send_long_text(update: Update, text: str):
     max_length = 3500
     for i in range(0, len(text), max_length):
@@ -756,7 +989,7 @@ EDIT_TEXT_WAIT_MESSAGES = [
 ]
 
 
-async def run_with_wait_messages(update: Update, func, *args, wait_messages=None):
+async def run_with_wait_messages(update: Update, func, *args, wait_messages=None, max_seconds=None):
     task = asyncio.create_task(asyncio.to_thread(func, *args))
 
     if wait_messages is None:
@@ -765,6 +998,9 @@ async def run_with_wait_messages(update: Update, func, *args, wait_messages=None
     elapsed = 0
 
     for seconds, message in wait_messages:
+        if max_seconds is not None and seconds > max_seconds:
+            break
+
         delay = seconds - elapsed
 
         try:
@@ -776,7 +1012,20 @@ async def run_with_wait_messages(update: Update, func, *args, wait_messages=None
                 reply_markup=generation_wait_keyboard()
             )
 
-    return await task
+    if max_seconds is None:
+        return await task
+
+    remaining = max_seconds - elapsed
+
+    if remaining <= 0:
+        task.cancel()
+        raise asyncio.TimeoutError()
+
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+    except asyncio.TimeoutError:
+        task.cancel()
+        raise
 
 
 # =========================
@@ -1342,15 +1591,48 @@ def process_yookassa_webhook(payload):
     local_payment_id = metadata.get("local_payment_id")
 
     if event == "payment.succeeded":
-        if not yookassa_payment_id or not local_payment_id:
-            raise ValueError("В webhook нет id платежа или local_payment_id")
+        if not yookassa_payment_id:
+            print("Webhook ЮKassa без id платежа:", payload)
+            return {
+                "action": "ignored",
+                "event": event,
+                "reason": "missing_payment_id",
+            }
 
         confirmed_payment = get_yookassa_payment(yookassa_payment_id)
+        confirmed_metadata = {
+            **metadata,
+            **(confirmed_payment.get("metadata") or {}),
+        }
+        confirmed_payment = {
+            **confirmed_payment,
+            "metadata": confirmed_metadata,
+        }
+        local_payment_id = (
+            local_payment_id
+            or confirmed_metadata.get("local_payment_id")
+        )
 
         if confirmed_payment.get("status") != "succeeded" or not confirmed_payment.get("paid"):
-            mark_payment_status(local_payment_id, confirmed_payment.get("status") or "pending")
+            status = confirmed_payment.get("status") or "pending"
+
+            if local_payment_id:
+                mark_payment_status(local_payment_id, status)
+            else:
+                mark_payment_status_by_yookassa_id(yookassa_payment_id, status)
+
             return {
                 "action": "not_paid",
+                "yookassa_payment_id": yookassa_payment_id,
+            }
+
+        if not local_payment_id:
+            local_payment_id = recover_payment_order_from_yookassa(confirmed_payment)
+
+        if not local_payment_id:
+            print(f"Webhook ЮKassa: не удалось восстановить заказ {yookassa_payment_id}")
+            return {
+                "action": "missing_order",
                 "yookassa_payment_id": yookassa_payment_id,
             }
 
@@ -1360,7 +1642,21 @@ def process_yookassa_webhook(payload):
         )
 
         if not order:
-            raise ValueError(f"Заказ для платежа {yookassa_payment_id} не найден")
+            local_payment_id = recover_payment_order_from_yookassa(
+                confirmed_payment,
+                local_payment_id,
+            )
+            order, credited_now = credit_payment_if_needed(
+                local_payment_id,
+                yookassa_payment_id,
+            )
+
+        if not order:
+            print(f"Webhook ЮKassa: заказ для платежа {yookassa_payment_id} не найден")
+            return {
+                "action": "missing_order",
+                "yookassa_payment_id": yookassa_payment_id,
+            }
 
         return {
             "action": "credited" if credited_now else "already_credited",
@@ -1563,6 +1859,99 @@ async def offer_buy_nuts(update: Update, user_id):
     )
 
 
+async def show_profile(update: Update, user_id):
+    nuts = get_nuts(user_id)
+
+    await update.message.reply_text(
+        f"👤 Личный кабинет\n\n"
+        f"🌰 Твой баланс: {nuts} орешков\n\n"
+        f"1 орешек = 1 персональная музыкальная колыбельная.\n\n"
+        f"Здесь можно купить орешки или сразу создать новую колыбельную 🌙",
+        reply_markup=profile_keyboard()
+    )
+
+    return START
+
+
+async def show_buy_nuts_menu(update: Update):
+    await update.message.reply_text(
+        "🌰 Выбери количество орешков\n\n"
+        "1 орешек — 🔵 349 ₽\n"
+        "2 орешка — 🔵 499 ₽\n"
+        "3 орешка — 🔵 599 ₽",
+        reply_markup=buy_keyboard()
+    )
+
+    return START
+
+
+async def ask_payment_email(update: Update, context: ContextTypes.DEFAULT_TYPE, package_key):
+    context.user_data["pending_payment_package_key"] = package_key
+
+    await update.message.reply_text(
+        "📧 Напиши электронную почту для отправки чека.",
+        reply_markup=keyboard([])
+    )
+
+    return PAYMENT_EMAIL_INPUT
+
+
+async def begin_lullaby_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    nuts = get_nuts(user_id)
+
+    if nuts < NUTS_PER_GENERATION:
+        await offer_buy_nuts(update, user_id)
+        return START
+
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        "🌙 Давай создадим персональную колыбельную\n\n"
+        "Сначала напиши имя ребёнка.\n\n"
+        "✨ Важно: чтобы имя красиво звучало в песне, выдели ударную гласную БОЛЬШОЙ буквой.\n"
+        "Если в имени буква «е» произносится как «э», напиши её как «Э».\n\n"
+        "Примеры:\n"
+        "МилАна\n"
+        "КИра\n"
+        "МарсЭль\n"
+        "СофИя\n"
+        "МирОн\n"
+        "Ева\n"
+        "АлИса",
+        reply_markup=keyboard([])
+    )
+
+    return NAME_INPUT
+
+
+async def global_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = update.effective_user.id
+
+    create_user_if_not_exists(update.effective_user)
+
+    if is_restart(text):
+        return await start(update, context)
+
+    if is_home(text):
+        return await show_main_menu(update, context)
+
+    if text == "👤 Личный кабинет":
+        return await show_profile(update, user_id)
+
+    if text == "🌰 Купить орешки":
+        return await show_buy_nuts_menu(update)
+
+    if text in NUT_PACKAGES:
+        return await ask_payment_email(update, context, text)
+
+    if is_create_lullaby(text):
+        return await begin_lullaby_creation(update, context)
+
+    return START
+
+
 # =========================
 # СТАРТОВОЕ МЕНЮ / ЛИЧНЫЙ КАБИНЕТ
 # =========================
@@ -1580,62 +1969,31 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_main_menu(update, context)
 
     if text == "👤 Личный кабинет":
-        nuts = get_nuts(user_id)
-
-        await update.message.reply_text(
-            f"👤 Личный кабинет\n\n"
-            f"🌰 Твой баланс: {nuts} орешков\n\n"
-            f"1 орешек = 1 персональная музыкальная колыбельная.\n\n"
-            f"Здесь можно купить орешки или сразу создать новую колыбельную 🌙",
-            reply_markup=profile_keyboard()
-        )
-        return START
+        return await show_profile(update, user_id)
 
     if text == "🌰 Купить орешки":
-        await update.message.reply_text(
-            "🌰 Выбери количество орешков\n\n"
-            "1 орешек — 🔵 349 ₽\n"
-            "2 орешка — 🔵 499 ₽\n"
-            "3 орешка — 🔵 599 ₽",
-            reply_markup=buy_keyboard()
-        )
-        return START
+        return await show_buy_nuts_menu(update)
 
     if text in NUT_PACKAGES:
-        context.user_data["pending_payment_package_key"] = text
-
-        await update.message.reply_text(
-            "📧 Напиши электронную почту для отправки чека.",
-            reply_markup=keyboard([])
-        )
-        return PAYMENT_EMAIL_INPUT
+        return await ask_payment_email(update, context, text)
 
     if is_create_lullaby(text):
-        nuts = get_nuts(user_id)
+        return await begin_lullaby_creation(update, context)
 
-        if nuts < NUTS_PER_GENERATION:
-            await offer_buy_nuts(update, user_id)
-            return START
-
-        context.user_data.clear()
-
+    if text in [
+        "✅ Подтвердить",
+        "Подтвердить",
+        "✏️ Редактировать",
+        "Редактировать",
+        "🎵 Создать музыку",
+        "Создать музыку",
+    ]:
         await update.message.reply_text(
-            "🌙 Давай создадим персональную колыбельную\n\n"
-            "Сначала напиши имя ребёнка.\n\n"
-            "✨ Важно: чтобы имя красиво звучало в песне, выдели ударную гласную БОЛЬШОЙ буквой.\n"
-            "Если в имени буква «е» произносится как «э», напиши её как «Э».\n\n"
-            "Примеры:\n"
-            "МилАна\n"
-            "КИра\n"
-            "МарсЭль\n"
-            "СофИя\n"
-            "МирОн\n"
-            "Ева\n"
-            "АлИса",
-            reply_markup=keyboard([])
+            "🌙 Этот шаг уже устарел или бот был перезапущен.\n\n"
+            "Начни создание заново, чтобы я не потеряла текст и правильно собрала музыку.",
+            reply_markup=main_menu_keyboard()
         )
-
-        return NAME_INPUT
+        return START
 
     await update.message.reply_text(
         "🌙 Пожалуйста, выбери действие кнопкой ниже.",
@@ -2256,7 +2614,8 @@ async def final_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update,
             generate_and_prepare_lullaby,
             context.user_data,
-            wait_messages=CREATE_TEXT_WAIT_MESSAGES
+            wait_messages=CREATE_TEXT_WAIT_MESSAGES,
+            max_seconds=TEXT_GENERATION_TIMEOUT_SECONDS,
         )
 
         context.user_data["lullaby_text"] = lullaby_text
@@ -2272,11 +2631,24 @@ async def final_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return LULLABY_REVIEW
 
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            "😔 Текст создаётся слишком долго, похоже связь с сервисом оборвалась.\n\n"
+            "🌰 Орешек не списан.\n\n"
+            "Можно попробовать создать текст ещё раз или изменить данные.",
+            reply_markup=keyboard([
+                ["✨ Создать текст"],
+                ["✏️ Изменить данные"]
+            ])
+        )
+        return FINAL_CONFIRM
+
     except Exception as error:
         print("Ошибка OpenAI:", error)
 
         await update.message.reply_text(
             "😔 Не получилось создать текст колыбельной.\n\n"
+            "🌰 Орешек не списан.\n\n"
             "Иногда сервис отвечает слишком долго. Можно попробовать ещё раз.",
             reply_markup=keyboard([
                 ["✨ Создать текст"],
@@ -2300,7 +2672,21 @@ async def lullaby_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_final_summary(update, context)
 
     if text in ["✅ Подтвердить", "Подтвердить"]:
-        return await generate_music(update, context)
+        if not context.user_data.get("lullaby_text"):
+            await update.message.reply_text(
+                "🌙 Я не вижу готовый текст колыбельной в текущем сеансе.\n\n"
+                "Похоже, бот перезапускался или потерял временное состояние. "
+                "Давай начнём создание заново, чтобы музыка собрала именно твой текст.",
+                reply_markup=main_menu_keyboard()
+            )
+            return START
+
+        await update.message.reply_text(
+            "✅ Текст подтверждён.\n\n"
+            "Теперь можно создать музыкальную колыбельную 🎵",
+            reply_markup=create_music_keyboard()
+        )
+        return GENERATE_MUSIC
 
     if text in ["✏️ Редактировать", "Редактировать"]:
         edit_count = context.user_data.get("edit_count", 0)
@@ -2382,7 +2768,8 @@ async def edit_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data,
             context.user_data["lullaby_text"],
             text,
-            wait_messages=EDIT_TEXT_WAIT_MESSAGES
+            wait_messages=EDIT_TEXT_WAIT_MESSAGES,
+            max_seconds=TEXT_GENERATION_TIMEOUT_SECONDS,
         )
 
         context.user_data["lullaby_text"] = new_text
@@ -2409,10 +2796,20 @@ async def edit_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return LULLABY_REVIEW
 
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            "😔 Правка текста заняла слишком много времени.\n\n"
+            "🌰 Орешек не списан.\n\n"
+            "Попробуй написать правку чуть проще или вернись к текущему тексту.",
+            reply_markup=text_review_keyboard()
+        )
+        return LULLABY_REVIEW
+
     except Exception as error:
         print("Ошибка OpenAI:", error)
         await update.message.reply_text(
             "😔 Не получилось изменить текст.\n\n"
+            "🌰 Орешек не списан.\n\n"
             "Попробуй написать правку чуть проще.",
             reply_markup=keyboard([])
         )
@@ -2457,7 +2854,16 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return START
 
-    lullaby_text = data["lullaby_text"]
+    lullaby_text = data.get("lullaby_text")
+
+    if not lullaby_text:
+        await update.message.reply_text(
+            "🌙 Не нашла готовый текст колыбельной.\n\n"
+            "Похоже, бот перезапускался или старый шаг уже устарел. "
+            "Создай текст заново, и я сразу соберу из него музыку.",
+            reply_markup=main_menu_keyboard()
+        )
+        return START
 
     await update.message.reply_text(
         f"🎵 {BRAND_NAME} создаёт музыкальную колыбельную...\n\n"
@@ -2467,43 +2873,64 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     try:
+        started_at = time.monotonic()
         genitive_name = make_genitive_name(data["name"])
         title = f"Колыбельная для {genitive_name}"
         style = make_music_style(data)
 
-        task_id = await asyncio.to_thread(create_music_task, lullaby_text, style, title)
+        task_id = await asyncio.wait_for(
+            asyncio.to_thread(create_music_task, lullaby_text, style, title),
+            timeout=max(1, seconds_left(started_at, MUSIC_GENERATION_TIMEOUT_SECONDS)),
+        )
 
         audio_urls = []
+        sent_messages = set()
 
-        for attempt in range(30):
-            await asyncio.sleep(10)
-            audio_urls = await asyncio.to_thread(get_music_audio_urls, task_id)
+        while seconds_left(started_at, MUSIC_GENERATION_TIMEOUT_SECONDS) > 0:
+            await asyncio.sleep(
+                min(10, max(1, seconds_left(started_at, MUSIC_GENERATION_TIMEOUT_SECONDS)))
+            )
+
+            audio_urls = await asyncio.wait_for(
+                asyncio.to_thread(get_music_audio_urls, task_id),
+                timeout=max(1, min(60, seconds_left(started_at, MUSIC_GENERATION_TIMEOUT_SECONDS))),
+            )
 
             if audio_urls:
                 break
 
-            if attempt == 6:
+            elapsed = time.monotonic() - started_at
+
+            if elapsed >= 70 and "soon" not in sent_messages:
+                sent_messages.add("soon")
                 await update.message.reply_text(
                     "⏳ Музыка ещё создаётся... Уже скоро будет волшебство 🌙",
                     reply_markup=generation_wait_keyboard()
                 )
 
-            if attempt == 14:
+            if elapsed >= 150 and "almost" not in sent_messages:
+                sent_messages.add("almost")
                 await update.message.reply_text(
                     "🎵 Почти готово. Собираю музыкальную колыбельную...",
                     reply_markup=generation_wait_keyboard()
                 )
 
-        if not audio_urls:
-            context.user_data.clear()
+            if elapsed >= 420 and "long" not in sent_messages:
+                sent_messages.add("long")
+                await update.message.reply_text(
+                    "🌙 Музыка создаётся дольше обычного, я всё ещё проверяю результат.\n\n"
+                    "Орешек спишется только после отправки готовой песни.",
+                    reply_markup=generation_wait_keyboard()
+                )
 
+        if not audio_urls:
             await update.message.reply_text(
                 "😔 Музыкальная колыбельная пока не готова.\n\n"
                 "🌰 Орешек не списан.\n\n"
-                "Можно попробовать создать музыку позже или зайти в личный кабинет.",
-                reply_markup=main_menu_keyboard()
+                "Можно попробовать создать музыку ещё раз позже.",
+                reply_markup=create_music_keyboard()
             )
-            return START
+            return GENERATE_MUSIC
 
         safe_title = clean_filename(title)
         audio_url = audio_urls[0]
@@ -2514,7 +2941,10 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         filename = f"{safe_title}.mp3"
-        file_path = await asyncio.to_thread(download_audio, audio_url, filename)
+        file_path = await asyncio.wait_for(
+            asyncio.to_thread(download_audio, audio_url, filename),
+            timeout=max(1, seconds_left(started_at, MUSIC_GENERATION_TIMEOUT_SECONDS)),
+        )
 
         with open(file_path, "rb") as audio_file:
             await update.message.reply_document(
@@ -2531,6 +2961,8 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         nuts_removed = remove_nuts(user_id, NUTS_PER_GENERATION)
         balance = get_nuts(user_id)
+        mark_lullaby_created(user_id)
+        add_lullabies(user_id, 1)
 
         context.user_data.clear()
 
@@ -2553,18 +2985,27 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return START
 
+    except asyncio.TimeoutError:
+        print("Suno/музыка: превышено время ожидания")
+
+        await update.message.reply_text(
+            "😔 Музыкальная колыбельная создаётся слишком долго, похоже связь с сервисом оборвалась.\n\n"
+            "🌰 Орешек не списан.\n\n"
+            "Можно попробовать создать музыку ещё раз позже.",
+            reply_markup=create_music_keyboard()
+        )
+        return GENERATE_MUSIC
+
     except Exception as error:
         print("Ошибка Suno/музыки:", error)
-
-        context.user_data.clear()
 
         await update.message.reply_text(
             "😔 Не получилось создать музыкальную колыбельную.\n\n"
             "🌰 Орешек не списан.\n\n"
-            "Можно попробовать позже или зайти в личный кабинет.",
-            reply_markup=main_menu_keyboard()
+            "Можно попробовать ещё раз позже.",
+            reply_markup=create_music_keyboard()
         )
-        return START
+        return GENERATE_MUSIC
 
 
 # =========================
@@ -2591,6 +3032,171 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🌰 Твой баланс: {nuts} орешков\n\n"
         f"1 орешек = 1 персональная музыкальная колыбельная",
         reply_markup=profile_keyboard()
+    )
+
+
+def get_command_payload(update: Update):
+    text = update.message.text or ""
+    parts = text.split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def reminder_message():
+    return (
+        "🌙 Давно не создавали новую колыбельную?\n\n"
+        "Колыбельная может быть не только первой песней для сна. "
+        "Её можно сделать под событие: день рождения, первый день в школе, "
+        "новую игрушку, поездку в другой город, новый велосипед или просто важный вечер.\n\n"
+        "✨ Получится маленькая песня-память именно про вашего ребёнка и этот момент."
+    )
+
+
+async def send_message_safely(bot, user_id, text, reply_markup=None):
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+        return True
+    except Exception as error:
+        print(f"Не удалось отправить сообщение пользователю {user_id}:", error)
+        return False
+
+
+async def send_bulk_message(bot, user_ids, text, reply_markup=None, mark_reminders=False):
+    sent = 0
+    failed = 0
+
+    for user_id in user_ids:
+        ok = await send_message_safely(bot, user_id, text, reply_markup=reply_markup)
+
+        if ok:
+            sent += 1
+            if mark_reminders:
+                mark_reminder_sent(user_id)
+        else:
+            failed += 1
+
+        await asyncio.sleep(0.05)
+
+    return sent, failed
+
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    message = get_command_payload(update)
+
+    if not message:
+        await update.message.reply_text(
+            "📣 Формат команды:\n"
+            "/broadcast текст рассылки\n\n"
+            "Например:\n"
+            "/broadcast Сегодня вечером будет технический перерыв."
+        )
+        return
+
+    user_ids = get_all_user_ids()
+
+    await update.message.reply_text(
+        f"📣 Начинаю рассылку для пользователей: {len(user_ids)}"
+    )
+
+    sent, failed = await send_bulk_message(
+        context.bot,
+        user_ids,
+        message,
+        reply_markup=main_menu_keyboard(),
+    )
+
+    await update.message.reply_text(
+        "✅ Рассылка завершена.\n\n"
+        f"Отправлено: {sent}\n"
+        f"Ошибок: {failed}"
+    )
+
+
+async def maintenance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    details = get_command_payload(update)
+    message = (
+        "🛠 Технический перерыв\n\n"
+        "Скоро бот может ненадолго работать нестабильно: мы обновляем Колыбелку, "
+        "чтобы оплата, орешки и создание песен работали спокойнее."
+    )
+
+    if details:
+        message += f"\n\n{details}"
+
+    user_ids = get_all_user_ids()
+    await update.message.reply_text(
+        f"🛠 Отправляю уведомление о техперерыве: {len(user_ids)} пользователей"
+    )
+
+    sent, failed = await send_bulk_message(
+        context.bot,
+        user_ids,
+        message,
+        reply_markup=main_menu_keyboard(),
+    )
+
+    await update.message.reply_text(
+        "✅ Уведомление отправлено.\n\n"
+        f"Отправлено: {sent}\n"
+        f"Ошибок: {failed}"
+    )
+
+
+async def remindnow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    user_ids = get_users_for_reminder()
+
+    await update.message.reply_text(
+        f"🌙 Запускаю мягкое напоминание: {len(user_ids)} пользователей"
+    )
+
+    sent, failed = await send_bulk_message(
+        context.bot,
+        user_ids,
+        reminder_message(),
+        reply_markup=main_menu_keyboard(),
+        mark_reminders=True,
+    )
+
+    await update.message.reply_text(
+        "✅ Напоминания отправлены.\n\n"
+        f"Отправлено: {sent}\n"
+        f"Ошибок: {failed}"
+    )
+
+
+async def stopreminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    create_user_if_not_exists(update.effective_user)
+    set_reminders_enabled(update.effective_user.id, False)
+
+    await update.message.reply_text(
+        "🌙 Хорошо, я больше не буду присылать напоминания.\n\n"
+        "Основные сообщения бота и оплата продолжат работать.",
+        reply_markup=main_menu_keyboard()
+    )
+
+
+async def startreminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    create_user_if_not_exists(update.effective_user)
+    set_reminders_enabled(update.effective_user.id, True)
+
+    await update.message.reply_text(
+        "🌙 Готово, мягкие напоминания снова включены.",
+        reply_markup=main_menu_keyboard()
     )
 
 
@@ -2657,16 +3263,116 @@ async def addnuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print("Не удалось уведомить пользователя о ручном начислении:", error)
 
 
+async def removenuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "🌰 Формат команды:\n"
+            "/removenuts user_id количество\n\n"
+            "Например:\n"
+            "/removenuts 123456789 1"
+        )
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+        amount = int(context.args[1])
+    except ValueError:
+        await update.message.reply_text("🌙 user_id и количество должны быть числами.")
+        return
+
+    if amount <= 0 or amount > 100:
+        await update.message.reply_text("🌙 Количество орешков должно быть от 1 до 100.")
+        return
+
+    create_user_id_if_not_exists(target_user_id)
+    balance_before = get_nuts(target_user_id)
+
+    if balance_before < amount:
+        await update.message.reply_text(
+            "🌙 Не получилось списать орешки вручную.\n\n"
+            f"Пользователь: {target_user_id}\n"
+            f"Текущий баланс: {balance_before}\n"
+            f"Нужно списать: {amount}"
+        )
+        return
+
+    remove_nuts(target_user_id, amount)
+    balance = get_nuts(target_user_id)
+
+    await update.message.reply_text(
+        "✅ Орешки списаны вручную.\n\n"
+        f"Пользователь: {target_user_id}\n"
+        f"Списано: {amount}\n"
+        f"Баланс: {balance}"
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "🌰 Баланс орешков обновлён администратором.\n\n"
+                f"Списано: {amount}\n"
+                f"Текущий баланс: {balance} орешков"
+            ),
+            reply_markup=profile_keyboard()
+        )
+    except Exception as error:
+        print("Не удалось уведомить пользователя о ручном списании:", error)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     print("⚠️ Ошибка Telegram/сети:", context.error)
 
 
+async def send_automatic_reminders(app):
+    if not REMINDERS_ENABLED:
+        return
+
+    user_ids = get_users_for_reminder()
+
+    if not user_ids:
+        return
+
+    print(f"Автонапоминания: найдено пользователей {len(user_ids)}")
+
+    sent, failed = await send_bulk_message(
+        app.bot,
+        user_ids,
+        reminder_message(),
+        reply_markup=main_menu_keyboard(),
+        mark_reminders=True,
+    )
+
+    print(f"Автонапоминания: отправлено {sent}, ошибок {failed}")
+
+
+async def reminder_worker(app):
+    await asyncio.sleep(120)
+
+    while True:
+        try:
+            await send_automatic_reminders(app)
+        except Exception as error:
+            print("Ошибка автоматических напоминаний:", error)
+
+        await asyncio.sleep(max(3600, REMINDER_INTERVAL_HOURS * 3600))
+
+
 async def on_app_start(app):
-    global TELEGRAM_EVENT_LOOP
+    global TELEGRAM_EVENT_LOOP, REMINDER_TASK
     TELEGRAM_EVENT_LOOP = asyncio.get_running_loop()
+
+    if REMINDER_TASK is None or REMINDER_TASK.done():
+        REMINDER_TASK = asyncio.create_task(reminder_worker(app))
 
 
 def main():
+    migrate_existing_db_to_persistent_path()
+    ensure_persistence_dir()
     init_db()
 
     if not TELEGRAM_TOKEN:
@@ -2689,6 +3395,7 @@ def main():
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
+        .persistence(PicklePersistence(filepath=PERSISTENCE_PATH))
         .post_init(on_app_start)
         .connect_timeout(60)
         .read_timeout(180)
@@ -2696,6 +3403,22 @@ def main():
         .pool_timeout(180)
         .build()
     )
+
+    global_button_texts = [
+        "🏠 Главное меню",
+        "Главное меню",
+        "🌰 Купить орешки",
+        "👤 Личный кабинет",
+        "🌙 Создать новую колыбельную",
+        "Создать новую колыбельную",
+        "🌙 Создать колыбельную",
+        "Создать колыбельную",
+        *NUT_PACKAGES.keys(),
+    ]
+    global_button_filter = filters.Regex(
+        "^(" + "|".join(re.escape(text) for text in global_button_texts) + ")$"
+    )
+    global_button_handler = MessageHandler(global_button_filter, global_button)
 
     conversation = ConversationHandler(
         entry_points=[
@@ -2707,22 +3430,22 @@ def main():
         ],
         states={
             START: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_button)],
-            NAME_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_input)],
-            NAME_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_confirm)],
-            GENDER_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, gender_input)],
-            AGE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, age_input)],
-            AGE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, age_confirm)],
-            CHAR_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, char_input)],
-            CHAR_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, char_confirm)],
-            VOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, voice_choice)],
-            MOOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, mood_choice)],
-            THEME: [MessageHandler(filters.TEXT & ~filters.COMMAND, theme_choice)],
-            THEME_CUSTOM: [MessageHandler(filters.TEXT & ~filters.COMMAND, theme_custom_input)],
-            FINAL_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, final_confirm)],
-            LULLABY_REVIEW: [MessageHandler(filters.TEXT & ~filters.COMMAND, lullaby_review)],
-            EDIT_REQUEST: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_request)],
-            GENERATE_MUSIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, generate_music_button)],
-            PAYMENT_EMAIL_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, payment_email_input)],
+            NAME_INPUT: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, name_input)],
+            NAME_CONFIRM: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, name_confirm)],
+            GENDER_INPUT: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, gender_input)],
+            AGE_INPUT: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, age_input)],
+            AGE_CONFIRM: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, age_confirm)],
+            CHAR_INPUT: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, char_input)],
+            CHAR_CONFIRM: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, char_confirm)],
+            VOICE: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, voice_choice)],
+            MOOD: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, mood_choice)],
+            THEME: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, theme_choice)],
+            THEME_CUSTOM: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, theme_custom_input)],
+            FINAL_CONFIRM: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, final_confirm)],
+            LULLABY_REVIEW: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, lullaby_review)],
+            EDIT_REQUEST: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, edit_request)],
+            GENERATE_MUSIC: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, generate_music_button)],
+            PAYMENT_EMAIL_INPUT: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, payment_email_input)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -2732,13 +3455,21 @@ def main():
             MessageHandler(filters.Regex("^Начать заново$"), start),
             MessageHandler(filters.Regex("^Начать сначала$"), start),
         ],
+        name="lullaby_conversation",
+        persistent=True,
         allow_reentry=True,
     )
 
     app.add_handler(conversation)
     app.add_handler(CommandHandler("balance", balance_command))
     app.add_handler(CommandHandler("myid", myid_command))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(CommandHandler("maintenance", maintenance_command))
+    app.add_handler(CommandHandler("remindnow", remindnow_command))
+    app.add_handler(CommandHandler("stopreminders", stopreminders_command))
+    app.add_handler(CommandHandler("startreminders", startreminders_command))
     app.add_handler(CommandHandler("addnuts", addnuts_command))
+    app.add_handler(CommandHandler("removenuts", removenuts_command))
     app.add_error_handler(error_handler)
 
     if yookassa_is_configured():
