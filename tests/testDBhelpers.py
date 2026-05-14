@@ -33,6 +33,16 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertFalse(bot.remove_nuts(user.id, 2))
         self.assertEqual(bot.get_nuts(user.id), 1)
 
+    def test_create_user_does_not_reset_existing_nuts(self):
+        user = SimpleNamespace(id=1010, username="first_name")
+        bot.create_user_if_not_exists(user)
+        bot.add_nuts(user.id, 3)
+
+        same_user = SimpleNamespace(id=1010, username="new_name")
+        bot.create_user_if_not_exists(same_user)
+
+        self.assertEqual(bot.get_nuts(user.id), 3)
+
     def test_paid_order_is_credited_once(self):
         user = SimpleNamespace(id=1002, username="buyer")
         bot.create_user_if_not_exists(user)

@@ -66,7 +66,7 @@ def get_default_db_path():
 
     bot_host_shared_dir = "/app/shared"
 
-    if os.path.isdir(bot_host_shared_dir):
+    if os.path.isdir(bot_host_shared_dir) or os.path.isdir("/app"):
         return os.path.join(bot_host_shared_dir, "kolybelka.db")
 
     return os.path.join(BASE_DIR, "kolybelka.db")
@@ -564,6 +564,30 @@ def get_user_summaries(limit=20):
         }
         for row in rows
     ]
+
+
+def get_database_stats():
+    with db_connection() as conn:
+        users_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        payments_count = conn.execute("SELECT COUNT(*) FROM payments").fetchone()[0]
+        total_nuts = conn.execute("SELECT COALESCE(SUM(nuts), 0) FROM users").fetchone()[0]
+        db_user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+
+    db_exists = os.path.exists(DB_PATH)
+    db_size = os.path.getsize(DB_PATH) if db_exists else 0
+
+    return {
+        "db_path": DB_PATH,
+        "db_exists": db_exists,
+        "db_size": db_size,
+        "users_count": users_count,
+        "payments_count": payments_count,
+        "total_nuts": total_nuts,
+        "db_user_version": db_user_version,
+        "base_dir": BASE_DIR,
+        "shared_dir": os.getenv("SHARED_DIR", ""),
+        "persistence_path": PERSISTENCE_PATH,
+    }
 
 
 def get_users_for_reminder():
@@ -3666,6 +3690,33 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def dbstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    stats = get_database_stats()
+    legacy_db_path = os.path.join(BASE_DIR, "kolybelka.db")
+    legacy_users_count = 0
+
+    if os.path.abspath(DB_PATH) != os.path.abspath(legacy_db_path):
+        legacy_users_count = len(read_legacy_db_rows(legacy_db_path, "users"))
+
+    await update.message.reply_text(
+        "🗄 SQLite база\n\n"
+        f"Текущая база: {stats['db_path']}\n"
+        f"Файл существует: {'да' if stats['db_exists'] else 'нет'}\n"
+        f"Размер файла: {stats['db_size']} байт\n"
+        f"Папка проекта: {stats['base_dir']}\n"
+        f"SHARED_DIR: {stats['shared_dir'] or 'не задан'}\n"
+        f"Файл состояния: {stats['persistence_path']}\n\n"
+        f"Пользователей: {stats['users_count']}\n"
+        f"Платежей: {stats['payments_count']}\n"
+        f"Орешков всего на балансах: {stats['total_nuts']}\n"
+        f"Пользователей в старой базе рядом с bot.py: {legacy_users_count}"
+    )
+
+
 async def stopreminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     create_user_if_not_exists(update.effective_user)
     set_reminders_enabled(update.effective_user.id, False)
@@ -3868,6 +3919,8 @@ def main():
     init_db()
     merge_legacy_db_into_current_db()
     init_db()
+    print(f"SQLite DB_PATH: {DB_PATH}")
+    print(f"Telegram state PERSISTENCE_PATH: {PERSISTENCE_PATH}")
 
     if not TELEGRAM_TOKEN:
         print("Ошибка: TELEGRAM_TOKEN не найден")
@@ -3969,6 +4022,7 @@ def main():
     app.add_handler(CommandHandler("remindnow", remindnow_command), group=-1)
     app.add_handler(CommandHandler("remindpreview", remindpreview_command), group=-1)
     app.add_handler(CommandHandler("users", users_command), group=-1)
+    app.add_handler(CommandHandler("dbstatus", dbstatus_command), group=-1)
     app.add_handler(CommandHandler("stopreminders", stopreminders_command), group=-1)
     app.add_handler(CommandHandler("startreminders", startreminders_command), group=-1)
     app.add_handler(CommandHandler("addnuts", addnuts_command), group=-1)
