@@ -51,7 +51,8 @@ TELEGRAM_EVENT_LOOP = None
 SUNO_BASE_URL = "https://api.sunoapi.org"
 YOOKASSA_BASE_URL = "https://api.yookassa.ru/v3"
 
-DB_PATH = "kolybelka.db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "kolybelka.db"))
 
 MAX_EDITS = 5
 NUTS_PER_GENERATION = 1
@@ -206,6 +207,9 @@ def create_music_keyboard():
 
 @contextmanager
 def db_connection():
+    db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+    os.makedirs(db_dir, exist_ok=True)
+
     conn = sqlite3.connect(DB_PATH)
 
     try:
@@ -542,6 +546,7 @@ def make_stressed_name(name_text):
             "✨ Примеры:\n"
             "МилАна\n"
             "АртЁм\n"
+            "МарсЭль\n"
             "СофИя\n"
             "МирОн\n"
             "Ева\n"
@@ -561,6 +566,7 @@ def make_stressed_name(name_text):
                 "✨ Примеры:\n"
                 "МилАна\n"
                 "АртЁм\n"
+                "МарсЭль\n"
                 "СофИя\n"
                 "МирОн\n"
                 "Ева\n"
@@ -574,12 +580,16 @@ def make_stressed_name(name_text):
 
     for i, char in enumerate(text):
         lower_char = char.lower()
+        plain_char = lower_char
+
+        if i != 0 and lower_char == "э":
+            plain_char = "е"
 
         if i == index:
-            plain_chars.append(lower_char)
+            plain_chars.append(plain_char)
             stressed_chars.append(lower_char + STRESS_MARK)
         else:
-            plain_chars.append(lower_char)
+            plain_chars.append(plain_char)
             stressed_chars.append(lower_char)
 
     plain_name = "".join(plain_chars).capitalize()
@@ -734,17 +744,15 @@ async def send_long_text(update: Update, text: str):
 
 
 CREATE_TEXT_WAIT_MESSAGES = [
-    (5, "🐿️ Колыбелка подбирает самые нежные слова для текста 🌙"),
-    (10, "✨ Текст складывается в мягкий ритм"),
-    (15, "🌙 Почти готово... проверяю строки и ударения"),
-    (20, "🐿️ Колыбелка ещё немного шлифует текст ✨"),
+    (20, "🐿️ Колыбелка подбирает самые нежные слова для текста 🌙"),
+    (50, "✨ Текст складывается в мягкий ритм"),
+    (90, "🌙 Почти готово... проверяю строки и ударения"),
 ]
 
 EDIT_TEXT_WAIT_MESSAGES = [
-    (5, "✏️ Колыбелка уже вносит правки в текст 🌙"),
-    (10, "✨ Ещё немного... подправляю строки, чтобы текст звучал мягче"),
-    (15, "🌙 Почти готово... проверяю новые слова и окончания"),
-    (20, "🐿️ Колыбелка внимательно перечитывает текст, чтобы всё было красиво ✨"),
+    (20, "✏️ Колыбелка уже вносит правки в текст 🌙"),
+    (50, "✨ Ещё немного... подправляю строки, чтобы текст звучал мягче"),
+    (90, "🌙 Почти готово... проверяю новые слова, окончания и ударения"),
 ]
 
 
@@ -818,9 +826,39 @@ def get_gender_context(data):
     return "пол ребёнка не указан, избегай форм, где нужно выбирать мужской или женский род"
 
 
+def get_name_pronunciation_context(data):
+    name = data.get("name", "")
+    name_stressed = data.get("name_stressed", name)
+
+    return (
+        f"Обычное написание имени: {name}. "
+        f"Для песни используй вокальное написание с ударением: {name_stressed}. "
+        "Если в вокальном написании есть буква «э», это фонетическая подсказка "
+        "для правильного пения имени, например Марсэ́ль."
+    )
+
+
+def get_character_context(data):
+    characters = data.get("characters", "")
+
+    if characters == "без персонажей":
+        return "Пользователь попросил песню без персонажей: не добавляй персонажей."
+
+    return (
+        "Если пользователь указал известных персонажей, героев мультфильмов, "
+        "спортсменов или других публичных людей, можно упомянуть их в мягком "
+        "детском контексте как образ мечты, игры или вдохновения. "
+        "Обязательно используй указанных персонажей и имена, если они безопасны "
+        "для детской колыбельной. Не утверждай, что реальная публичная личность "
+        "лично участвует в песне, не говори от её лица и не имитируй её голос."
+    )
+
+
 def generate_lullaby_text(data):
     age_context = get_age_context(data)
     gender_context = get_gender_context(data)
+    name_context = get_name_pronunciation_context(data)
+    character_context = get_character_context(data)
 
     prompt = f"""
 Ты профессиональный автор детских колыбельных.
@@ -829,29 +867,33 @@ def generate_lullaby_text(data):
 
 Данные:
 Имя ребёнка: {data["name_stressed"]}
+Фонетика имени: {name_context}
 Пол ребёнка: {data["gender"]}
 Возраст ребёнка: {data["age"]}
 Возрастной контекст: {age_context}
 Грамматический контекст пола: {gender_context}
 Персонажи и образы: {data["characters"]}
+Контекст персонажей: {character_context}
 Голос для музыкальной версии: {data["voice"]}
 Настроение: {data["mood"]}
 Тема: {data["theme"]}
 
 Структура:
-- Куплет
-- Припев
-- Куплет
-- Припев
+- Куплет: 4 строки
+- Припев: 8 строк, то есть 2 четверостишия
+- Куплет: 4 строки
+- Припев: повтори те же самые 8 строк без изменений
 
 Правила:
-- общая длина: 500–900 символов
-- припев должен повторяться одинаковым текстом
-- припев должен быть коротким и легко запоминаться
+- общая длина: 700–1200 символов
+- припев должен состоять ровно из двух четверостиший
+- оба повторения припева должны быть одинаковым текстом
+- припев должен легко запоминаться и мягко петься
 - НЕ пиши слова "Куплет" или "Припев"
 - текст должен идти как обычная песня
 - используй только имя ребёнка: {data["name_stressed"]}
 - ударение в имени уже проставлено, сохраняй его во всех повторениях имени
+- учитывай фонетику имени и не меняй вокальное написание имени
 - обязательно учитывай пол ребёнка и ставь правильные окончания
 - если ребёнок девочка, не используй мужские формы: уснул, смотрел, играл, маленький, добрый
 - если ребёнок мальчик, не используй женские формы: уснула, смотрела, играла, маленькая, добрая
@@ -880,17 +922,21 @@ def generate_lullaby_text(data):
 def edit_lullaby_text(data, old_text, edit_request):
     age_context = get_age_context(data)
     gender_context = get_gender_context(data)
+    name_context = get_name_pronunciation_context(data)
+    character_context = get_character_context(data)
 
     prompt = f"""
 Перепиши детскую колыбельную с учётом правки пользователя.
 
 Данные:
 Имя ребёнка: {data["name_stressed"]}
+Фонетика имени: {name_context}
 Пол ребёнка: {data["gender"]}
 Возраст ребёнка: {data["age"]}
 Возрастной контекст: {age_context}
 Грамматический контекст пола: {gender_context}
 Персонажи: {data["characters"]}
+Контекст персонажей: {character_context}
 Голос для музыкальной версии: {data["voice"]}
 Настроение: {data["mood"]}
 Тема: {data["theme"]}
@@ -902,12 +948,14 @@ def edit_lullaby_text(data, old_text, edit_request):
 {edit_request}
 
 Правила:
-- структура: Куплет → Припев → Куплет → Припев
-- припев должен повторяться одинаковым текстом
-- длина: 500–900 символов
+- структура: Куплет 4 строки → Припев 8 строк → Куплет 4 строки → тот же Припев 8 строк
+- припев должен состоять из 2 четверостиший
+- оба повторения припева должны быть одинаковым текстом
+- длина: 700–1200 символов
 - НЕ пиши слова "Куплет" или "Припев"
 - используй только имя ребёнка: {data["name_stressed"]}
 - сохраняй ударение в имени
+- сохраняй фонетическое написание имени
 - обязательно учитывай пол ребёнка и ставь правильные окончания
 - если ребёнок девочка, не используй мужские формы: уснул, смотрел, играл, маленький, добрый
 - если ребёнок мальчик, не используй женские формы: уснула, смотрела, играла, маленькая, добрая
@@ -931,24 +979,32 @@ def edit_lullaby_text(data, old_text, edit_request):
 
 def polish_lullaby_text(data, text):
     gender_context = get_gender_context(data)
+    name_context = get_name_pronunciation_context(data)
+    character_context = get_character_context(data)
 
     prompt = f"""
 Проверь детскую колыбельную на русском языке.
 
 Данные:
 Имя ребёнка: {data["name_stressed"]}
+Фонетика имени: {name_context}
 Пол ребёнка: {data["gender"]}
 Грамматический контекст пола: {gender_context}
+Персонажи и образы: {data["characters"]}
+Контекст персонажей: {character_context}
 
 Задача:
 - исправь грамматические ошибки
 - исправь неестественные фразы
 - улучши фонетику для пения
 - упрости сложные слова
-- структура должна быть: Куплет → Припев → Куплет → Припев
-- припев должен повторяться одинаковым текстом
+- структура должна быть: Куплет 4 строки → Припев 8 строк → Куплет 4 строки → тот же Припев 8 строк
+- припев должен состоять из 2 четверостиший
+- оба повторения припева должны быть одинаковым текстом
 - сохрани мягкий ритм колыбельной
 - сохрани имя ребёнка именно так: {data["name_stressed"]}
+- сохрани фонетическое написание имени
+- сохрани безопасных персонажей и образы, которые указал пользователь
 - обязательно исправь окончания по полу ребёнка
 - если ребёнок девочка, не используй мужские формы: уснул, смотрел, играл, маленький, добрый
 - если ребёнок мальчик, не используй женские формы: уснула, смотрела, играла, маленькая, добрая
@@ -972,18 +1028,23 @@ def polish_lullaby_text(data, text):
 
 def add_stress_marks_to_song(data, text):
     gender_context = get_gender_context(data)
+    name_context = get_name_pronunciation_context(data)
 
     prompt = f"""
 Расставь ударения в тексте русской детской песни для музыкальной генерации Suno.
 
 Данные:
 Имя ребёнка: {data["name_stressed"]}
+Фонетика имени: {name_context}
 Пол ребёнка: {data["gender"]}
 Грамматический контекст пола: {gender_context}
 
 Важно:
 - добавь знак ударения ́ после ударной гласной в каждом русском слове, где это возможно
+- в каждом русском слове должно быть не больше одного знака ударения
+- не ставь ударение в односложных служебных словах, если это звучит неестественно
 - имя ребёнка всегда пиши именно так: {data["name_stressed"]}
+- сохрани фонетическое написание имени
 - не меняй слова
 - не меняй строки
 - не меняй смысл
@@ -991,6 +1052,41 @@ def add_stress_marks_to_song(data, text):
 - не добавляй пояснения
 - не добавляй заголовки
 - верни только текст песни с ударениями
+
+Текст:
+{text}
+"""
+
+    response = get_openai_client().responses.create(
+        model="gpt-5.2",
+        input=prompt
+    )
+
+    return response.output_text
+
+
+def verify_stress_marks_for_song(data, text):
+    gender_context = get_gender_context(data)
+    name_context = get_name_pronunciation_context(data)
+
+    prompt = f"""
+Проведи финальную проверку ударений в русской детской песне для музыкальной генерации.
+
+Данные:
+Имя ребёнка: {data["name_stressed"]}
+Фонетика имени: {name_context}
+Пол ребёнка: {data["gender"]}
+Грамматический контекст пола: {gender_context}
+
+Задача:
+- проверь каждое русское слово и исправь неверные ударения
+- добавь пропущенные ударения в значимых русских словах
+- в одном слове должен быть не больше одного знака ударения
+- имя ребёнка всегда пиши именно так: {data["name_stressed"]}
+- сохрани фонетическое написание имени
+- не меняй слова, строки, смысл, порядок строк и родовые окончания
+- не добавляй пояснения
+- верни только исправленный текст песни с ударениями
 
 Текст:
 {text}
@@ -1018,8 +1114,9 @@ def prepare_final_lyrics(data, raw_text):
     polished = polish_lullaby_text(data, raw_text)
     repaired, note = safety_repair_and_note(data, polished)
     stressed = add_stress_marks_to_song(data, repaired)
+    verified = verify_stress_marks_for_song(data, stressed)
 
-    return stressed, note
+    return verified, note
 
 
 def generate_and_prepare_lullaby(data):
@@ -1525,10 +1622,12 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🌙 Давай создадим персональную колыбельную\n\n"
             "Сначала напиши имя ребёнка.\n\n"
-            "✨ Важно: чтобы имя красиво звучало в песне, выдели ударную гласную БОЛЬШОЙ буквой.\n\n"
+            "✨ Важно: чтобы имя красиво звучало в песне, выдели ударную гласную БОЛЬШОЙ буквой.\n"
+            "Если в имени буква «е» произносится как «э», напиши её как «Э».\n\n"
             "Примеры:\n"
             "МилАна\n"
             "КИра\n"
+            "МарсЭль\n"
             "СофИя\n"
             "МирОн\n"
             "Ева\n"
@@ -1614,7 +1713,7 @@ async def name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✨ Отлично, я запомнила имя!\n\n"
         f"👶 Имя ребёнка: {plain_name}\n"
-        f"🎵 С ударением для песни: {stressed_name}\n\n"
+        f"🎵 Произношение для песни: {stressed_name}\n\n"
         f"Так правильно?",
         reply_markup=yes_change_keyboard()
     )
@@ -1631,10 +1730,12 @@ async def name_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_back(text) or is_change(text):
         await update.message.reply_text(
             "🌙 Напиши имя ребёнка заново.\n\n"
-            "Ударную гласную выдели БОЛЬШОЙ буквой.\n\n"
+            "Ударную гласную выдели БОЛЬШОЙ буквой.\n"
+            "Если «е» в имени звучит как «э», напиши эту букву как «Э».\n\n"
             "Примеры:\n"
             "МилАна\n"
             "АртЁм\n"
+            "МарсЭль\n"
             "СофИя\n"
             "МирОн\n"
             "Ева\n"
@@ -1675,8 +1776,9 @@ async def gender_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_back(text):
         await update.message.reply_text(
             "🌙 Вернёмся к имени.\n\n"
-            "Напиши имя ребёнка и выдели ударную гласную БОЛЬШОЙ буквой.\n\n"
-            "Например: МилАна",
+            "Напиши имя ребёнка и выдели ударную гласную БОЛЬШОЙ буквой.\n"
+            "Если «е» звучит как «э», напиши эту букву как «Э».\n\n"
+            "Например: МилАна или МарсЭль",
             reply_markup=keyboard([])
         )
         return NAME_INPUT
@@ -1772,7 +1874,8 @@ async def age_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧸 Кого добавить в колыбельную?\n\n"
         "Это могут быть любимые герои, игрушки или близкие люди.\n\n"
         "Например:\n"
-        "мама, папа, мишка, зайка, Синий трактор\n\n"
+        "мама, папа, мишка, зайка, Синий трактор, Роналду\n\n"
+        "Можно указать популярного героя или известного человека как добрый образ для мечты или игры.\n\n"
         "Если хочешь песню без персонажей — нажми кнопку ниже.",
         reply_markup=keyboard([
             ["🧸 Без персонажей"]
@@ -2083,7 +2186,7 @@ async def show_final_summary(update: Update, context: ContextTypes.DEFAULT_TYPE)
 🌙 Почти готово! Проверь данные:
 
 👶 Имя: {data["name"]}
-🎵 Имя с ударением: {data["name_stressed"]}
+🎵 Произношение для песни: {data["name_stressed"]}
 👶 Пол: {data["gender"]}
 🎂 Возраст: {data["age"]}
 🧸 Персонажи: {data["characters"]}
