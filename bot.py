@@ -3193,13 +3193,46 @@ def get_command_payload(update: Update):
     return parts[1].strip() if len(parts) > 1 else ""
 
 
-def reminder_message():
+REMINDER_MESSAGE_VARIANTS = [
+    (
+        "🌙 Иногда новая колыбельная нужна не потому, что старая надоела.\n\n"
+        "Её можно сделать под событие: новый велосипед, поездку, день рождения, "
+        "первый день в школе или просто важный вечер.\n\n"
+        "Получится песня, в которой ребёнку мягко снится именно его сегодняшний маленький праздник."
+    ),
+    (
+        "✨ У ребёнка появился новый этап?\n\n"
+        "Пошёл в школу, родился братик или сестрёнка, появилась любимая игрушка, "
+        "впереди поездка или большое семейное событие.\n\n"
+        "Можно создать колыбельную про этот момент, чтобы день закончился спокойно и тепло."
+    ),
+    (
+        "🌙 Колыбельная может быть тёплым завершением дня.\n\n"
+        "Сегодня гуляли, катались, учились чему-то новому или просто был хороший вечер дома? "
+        "Из этого можно сделать маленькую песню для сна.\n\n"
+        "Так у ребёнка появляется не одна колыбельная навсегда, а нежная музыкальная память о разных днях."
+    ),
+    (
+        "💛 Иногда самые важные истории совсем простые.\n\n"
+        "Новая игрушка, первый велосипед, дорога в гости, праздник, встреча с родными "
+        "или день, когда ребёнок особенно старался.\n\n"
+        "Можно превратить это в персональную колыбельную, чтобы ребёнок засыпал с добрым образом в голове."
+    ),
+]
+
+
+def reminder_message(user_id=None):
+    day_number = int(time.time() // 86400)
+
+    if user_id is None:
+        index = day_number % len(REMINDER_MESSAGE_VARIANTS)
+    else:
+        index = (day_number + int(user_id)) % len(REMINDER_MESSAGE_VARIANTS)
+
     return (
-        "🌙 Давно не создавали новую колыбельную?\n\n"
-        "Колыбельная может быть не только первой песней для сна. "
-        "Её можно сделать под событие: день рождения, первый день в школе, "
-        "новую игрушку, поездку в другой город, новый велосипед или просто важный вечер.\n\n"
-        "✨ Получится маленькая песня-память именно про вашего ребёнка и этот момент."
+        REMINDER_MESSAGE_VARIANTS[index] +
+        "\n\nСоздать новую колыбельную можно в главном меню 🌙\n"
+        "Если напоминания не нужны, их можно отключить командой /stopreminders."
     )
 
 
@@ -3221,7 +3254,8 @@ async def send_bulk_message(bot, user_ids, text, reply_markup=None, mark_reminde
     failed = 0
 
     for user_id in user_ids:
-        ok = await send_message_safely(bot, user_id, text, reply_markup=reply_markup)
+        message_text = text(user_id) if callable(text) else text
+        ok = await send_message_safely(bot, user_id, message_text, reply_markup=reply_markup)
 
         if ok:
             sent += 1
@@ -3319,7 +3353,7 @@ async def remindnow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sent, failed = await send_bulk_message(
         context.bot,
         user_ids,
-        reminder_message(),
+        reminder_message,
         reply_markup=main_menu_keyboard(),
         mark_reminders=True,
     )
@@ -3329,6 +3363,23 @@ async def remindnow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Отправлено: {sent}\n"
         f"Ошибок: {failed}"
     )
+
+
+async def remindpreview_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    await update.message.reply_text(
+        "🌙 Варианты мягких напоминаний:"
+    )
+
+    for index, message in enumerate(REMINDER_MESSAGE_VARIANTS, start=1):
+        await update.message.reply_text(
+            f"Вариант {index}\n\n{message}\n\n"
+            "Создать новую колыбельную можно в главном меню 🌙\n"
+            "Если напоминания не нужны, их можно отключить командой /stopreminders."
+        )
 
 
 async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3542,7 +3593,7 @@ async def send_automatic_reminders(app):
     sent, failed = await send_bulk_message(
         app.bot,
         user_ids,
-        reminder_message(),
+        reminder_message,
         reply_markup=main_menu_keyboard(),
         mark_reminders=True,
     )
@@ -3669,6 +3720,7 @@ def main():
     app.add_handler(CommandHandler("broadcast", broadcast_command), group=-1)
     app.add_handler(CommandHandler("maintenance", maintenance_command), group=-1)
     app.add_handler(CommandHandler("remindnow", remindnow_command), group=-1)
+    app.add_handler(CommandHandler("remindpreview", remindpreview_command), group=-1)
     app.add_handler(CommandHandler("users", users_command), group=-1)
     app.add_handler(CommandHandler("stopreminders", stopreminders_command), group=-1)
     app.add_handler(CommandHandler("startreminders", startreminders_command), group=-1)
