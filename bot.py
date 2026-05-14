@@ -277,7 +277,8 @@ NUT_PACKAGES = {
     EDIT_REQUEST,
     GENERATE_MUSIC,
     PAYMENT_EMAIL_INPUT,
-) = range(17)
+    PROFILE_VIEW,
+) = range(18)
 
 
 BAD_WORDS = [
@@ -340,6 +341,17 @@ def profile_keyboard():
     ], with_nav=False)
 
 
+def flow_profile_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["🌰 Купить орешки"],
+            ["⬅️ Вернуться назад"],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
 def buy_keyboard():
     return keyboard([
         ["🌰 Купить 1 орешек"],
@@ -347,6 +359,19 @@ def buy_keyboard():
         ["🌰 Купить 3 орешка"],
         ["🏠 Главное меню"],
     ], with_nav=False)
+
+
+def flow_buy_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["🌰 Купить 1 орешек"],
+            ["🌰 Купить 2 орешка"],
+            ["🌰 Купить 3 орешка"],
+            ["⬅️ Вернуться назад"],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
 
 
 def yes_change_keyboard():
@@ -834,6 +859,13 @@ def is_back(text):
         "⬅️ Назад",
         "⬅️ Вернуться назад",
         "Назад",
+        "Вернуться назад",
+    ]
+
+
+def is_flow_return(text):
+    return text in [
+        "⬅️ Вернуться назад",
         "Вернуться назад",
     ]
 
@@ -1926,7 +1958,13 @@ def start_yookassa_webhook_server(app):
     return server
 
 
-async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, package_key, customer_email):
+async def send_payment_link(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    package_key,
+    customer_email,
+    reply_markup=None,
+):
     if not yookassa_is_configured():
         await update.message.reply_text(
             "😔 Оплата пока не настроена. Попробуй позже.",
@@ -1967,7 +2005,7 @@ async def send_payment_link(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         f"💳 Стоимость: 🔵 {format_price(package['price'])} ₽\n\n"
         f"Оплати по ссылке ЮKassa:\n{payment_url}\n\n"
         "После оплаты орешки начислятся автоматически, как только ЮKassa пришлёт подтверждение.",
-        reply_markup=buy_keyboard()
+        reply_markup=reply_markup or buy_keyboard()
     )
 
 
@@ -2011,30 +2049,36 @@ async def offer_buy_nuts(update: Update, user_id):
     )
 
 
-async def show_profile(update: Update, user_id):
+def save_profile_return_state(context: ContextTypes.DEFAULT_TYPE, source_state):
+    if source_state is not None and source_state != START:
+        context.user_data["_profile_return_state"] = source_state
+
+
+async def show_profile(update: Update, user_id, contextual=False):
     nuts = get_nuts(user_id)
 
     await update.message.reply_text(
         f"👤 Личный кабинет\n\n"
         f"🌰 Твой баланс: {nuts} орешков\n\n"
         f"1 орешек = 1 персональная музыкальная колыбельная.\n\n"
-        f"Здесь можно купить орешки или сразу создать новую колыбельную 🌙",
-        reply_markup=profile_keyboard()
+        f"Здесь можно купить орешки"
+        f"{' и вернуться к созданию колыбельной' if contextual else ' или сразу создать новую колыбельную 🌙'}",
+        reply_markup=flow_profile_keyboard() if contextual else profile_keyboard()
     )
 
-    return START
+    return PROFILE_VIEW if contextual else START
 
 
-async def show_buy_nuts_menu(update: Update):
+async def show_buy_nuts_menu(update: Update, contextual=False):
     await update.message.reply_text(
         "🌰 Выбери количество орешков\n\n"
         "1 орешек — 🔵 349 ₽\n"
         "2 орешка — 🔵 499 ₽\n"
         "3 орешка — 🔵 599 ₽",
-        reply_markup=buy_keyboard()
+        reply_markup=flow_buy_keyboard() if contextual else buy_keyboard()
     )
 
-    return START
+    return PROFILE_VIEW if contextual else START
 
 
 async def ask_payment_email(update: Update, context: ContextTypes.DEFAULT_TYPE, package_key):
@@ -2077,7 +2121,155 @@ async def begin_lullaby_creation(update: Update, context: ContextTypes.DEFAULT_T
     return NAME_INPUT
 
 
-async def global_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_state_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, state):
+    if state == NAME_INPUT:
+        await update.message.reply_text(
+            "🌙 Вернёмся к имени ребёнка.\n\n"
+            "Напиши имя и выдели ударную гласную БОЛЬШОЙ буквой.\n"
+            "Например: МилАна или МарсЭль",
+            reply_markup=keyboard([])
+        )
+        return NAME_INPUT
+
+    if state == NAME_CONFIRM and context.user_data.get("pending_name"):
+        await update.message.reply_text(
+            f"👶 Имя ребёнка: {context.user_data['pending_name']}\n"
+            f"🎵 Произношение для песни: {context.user_data.get('pending_name_stressed', context.user_data['pending_name'])}\n\n"
+            "Так правильно?",
+            reply_markup=yes_change_keyboard()
+        )
+        return NAME_CONFIRM
+
+    if state == GENDER_INPUT:
+        await update.message.reply_text(
+            "👶 Вернёмся к выбору пола ребёнка.",
+            reply_markup=gender_keyboard()
+        )
+        return GENDER_INPUT
+
+    if state == AGE_INPUT:
+        await update.message.reply_text(
+            "🎂 Вернёмся к возрасту ребёнка.\n\n"
+            "Например: 2 или 3,5",
+            reply_markup=keyboard([])
+        )
+        return AGE_INPUT
+
+    if state == AGE_CONFIRM and context.user_data.get("pending_age"):
+        await update.message.reply_text(
+            f"🎂 Возраст ребёнка: {context.user_data['pending_age']}\n\n"
+            "Всё верно?",
+            reply_markup=yes_change_keyboard()
+        )
+        return AGE_CONFIRM
+
+    if state == CHAR_INPUT:
+        await update.message.reply_text(
+            "🧸 Вернёмся к персонажам.\n\n"
+            "Напиши персонажей или нажми «🧸 Без персонажей».",
+            reply_markup=keyboard([
+                ["🧸 Без персонажей"]
+            ])
+        )
+        return CHAR_INPUT
+
+    if state == CHAR_CONFIRM and context.user_data.get("pending_characters"):
+        await update.message.reply_text(
+            f"🧸 Персонажи: {context.user_data['pending_characters']}\n\n"
+            "Всё верно?",
+            reply_markup=yes_change_keyboard()
+        )
+        return CHAR_CONFIRM
+
+    if state == VOICE:
+        await update.message.reply_text(
+            "🎤 Вернёмся к выбору голоса:",
+            reply_markup=keyboard([
+                ["👩 Женский голос"],
+                ["👨 Мужской голос"],
+                ["🧒 Детский голос"]
+            ])
+        )
+        return VOICE
+
+    if state == MOOD:
+        await update.message.reply_text(
+            "✨ Вернёмся к настроению колыбельной:",
+            reply_markup=keyboard([
+                ["💗 Очень нежная"],
+                ["🌟 Волшебная"],
+                ["🌙 Спокойная"],
+                ["🧚 Добрая сказочная"]
+            ])
+        )
+        return MOOD
+
+    if state == THEME:
+        await update.message.reply_text(
+            "🌌 Вернёмся к выбору темы:",
+            reply_markup=keyboard([
+                ["🌙 Звёзды и луна"],
+                ["🌲 Лес и зверята"],
+                ["☁️ Море и облака"],
+                ["🧸 Игрушки засыпают"],
+                ["🤍 Мама рядом"],
+                ["💙 Папа рядом"],
+                ["🌈 Свой вариант"]
+            ])
+        )
+        return THEME
+
+    if state == THEME_CUSTOM:
+        await update.message.reply_text(
+            "🌈 Вернёмся к своей теме колыбельной.\n\n"
+            "Напиши мягкую детскую тему.",
+            reply_markup=keyboard([])
+        )
+        return THEME_CUSTOM
+
+    if state == FINAL_CONFIRM:
+        return await show_final_summary(update, context)
+
+    if state == LULLABY_REVIEW:
+        await update.message.reply_text(
+            "✨ Текст тебе нравится?",
+            reply_markup=text_review_keyboard()
+        )
+        return LULLABY_REVIEW
+
+    if state == EDIT_REQUEST:
+        await update.message.reply_text(
+            "✏️ Вернёмся к правке текста.\n\n"
+            "Напиши, что изменить в колыбельной.",
+            reply_markup=keyboard([])
+        )
+        return EDIT_REQUEST
+
+    if state == GENERATE_MUSIC:
+        await update.message.reply_text(
+            "🎵 Вернёмся к созданию музыки.",
+            reply_markup=create_music_keyboard()
+        )
+        return GENERATE_MUSIC
+
+    if state == PAYMENT_EMAIL_INPUT:
+        await update.message.reply_text(
+            "📧 Вернёмся к оплате.\n\n"
+            "Напиши электронную почту для отправки чека.",
+            reply_markup=keyboard([])
+        )
+        return PAYMENT_EMAIL_INPUT
+
+    return await show_main_menu(update, context)
+
+
+async def return_to_saved_flow_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    state = context.user_data.pop("_profile_return_state", START)
+    context.user_data.pop("_profile_subview", None)
+    return await show_state_prompt(update, context, state)
+
+
+async def global_button(update: Update, context: ContextTypes.DEFAULT_TYPE, source_state=None):
     text = update.message.text
     user_id = update.effective_user.id
 
@@ -2090,10 +2282,12 @@ async def global_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_main_menu(update, context)
 
     if text == "👤 Личный кабинет":
-        return await show_profile(update, user_id)
+        save_profile_return_state(context, source_state)
+        return await show_profile(update, user_id, contextual=source_state not in (None, START))
 
     if text == "🌰 Купить орешки":
-        return await show_buy_nuts_menu(update)
+        save_profile_return_state(context, source_state)
+        return await show_buy_nuts_menu(update, contextual=source_state not in (None, START))
 
     if text in NUT_PACKAGES:
         return await ask_payment_email(update, context, text)
@@ -2154,11 +2348,46 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return START
 
 
+async def profile_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+
+    if is_restart(text):
+        context.user_data.pop("_profile_return_state", None)
+        context.user_data.pop("_profile_subview", None)
+        return await start(update, context)
+
+    if is_flow_return(text) or is_back(text):
+        return await return_to_saved_flow_step(update, context)
+
+    if text == "🌰 Купить орешки":
+        context.user_data["_profile_subview"] = "buy"
+        return await show_buy_nuts_menu(update, contextual=True)
+
+    if text in NUT_PACKAGES:
+        context.user_data["pending_payment_from_profile"] = True
+        return await ask_payment_email(update, context, text)
+
+    if text == "👤 Личный кабинет":
+        return await show_profile(update, update.effective_user.id, contextual=True)
+
+    await update.message.reply_text(
+        "🌙 Выбери действие кнопкой ниже.",
+        reply_markup=flow_profile_keyboard()
+    )
+    return PROFILE_VIEW
+
+
 async def payment_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
+    from_profile = context.user_data.get("pending_payment_from_profile")
 
     if is_restart(text):
         return await start(update, context)
+
+    if (is_back(text) or is_home(text) or is_flow_return(text)) and from_profile:
+        context.user_data.pop("pending_payment_package_key", None)
+        context.user_data.pop("pending_payment_from_profile", None)
+        return await show_profile(update, update.effective_user.id, contextual=True)
 
     if is_back(text) or is_home(text):
         context.user_data.pop("pending_payment_package_key", None)
@@ -2187,6 +2416,18 @@ async def payment_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         return START
 
     context.user_data.pop("pending_payment_package_key", None)
+    context.user_data.pop("pending_payment_from_profile", None)
+
+    if from_profile:
+        await send_payment_link(
+            update,
+            context,
+            package_key,
+            text,
+            reply_markup=flow_profile_keyboard(),
+        )
+        return PROFILE_VIEW
+
     await send_payment_link(update, context, package_key, text)
     return START
 
@@ -3671,7 +3912,12 @@ def main():
     global_button_filter = filters.Regex(
         "^(" + "|".join(re.escape(text) for text in global_button_texts) + ")$"
     )
-    global_button_handler = MessageHandler(global_button_filter, global_button)
+
+    def global_button_handler(source_state):
+        async def handle_global_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            return await global_button(update, context, source_state)
+
+        return MessageHandler(global_button_filter, handle_global_button)
 
     conversation = ConversationHandler(
         entry_points=[
@@ -3683,22 +3929,23 @@ def main():
         ],
         states={
             START: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_button)],
-            NAME_INPUT: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, name_input)],
-            NAME_CONFIRM: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, name_confirm)],
-            GENDER_INPUT: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, gender_input)],
-            AGE_INPUT: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, age_input)],
-            AGE_CONFIRM: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, age_confirm)],
-            CHAR_INPUT: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, char_input)],
-            CHAR_CONFIRM: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, char_confirm)],
-            VOICE: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, voice_choice)],
-            MOOD: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, mood_choice)],
-            THEME: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, theme_choice)],
-            THEME_CUSTOM: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, theme_custom_input)],
-            FINAL_CONFIRM: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, final_confirm)],
-            LULLABY_REVIEW: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, lullaby_review)],
-            EDIT_REQUEST: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, edit_request)],
-            GENERATE_MUSIC: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, generate_music_button)],
-            PAYMENT_EMAIL_INPUT: [global_button_handler, MessageHandler(filters.TEXT & ~filters.COMMAND, payment_email_input)],
+            NAME_INPUT: [global_button_handler(NAME_INPUT), MessageHandler(filters.TEXT & ~filters.COMMAND, name_input)],
+            NAME_CONFIRM: [global_button_handler(NAME_CONFIRM), MessageHandler(filters.TEXT & ~filters.COMMAND, name_confirm)],
+            GENDER_INPUT: [global_button_handler(GENDER_INPUT), MessageHandler(filters.TEXT & ~filters.COMMAND, gender_input)],
+            AGE_INPUT: [global_button_handler(AGE_INPUT), MessageHandler(filters.TEXT & ~filters.COMMAND, age_input)],
+            AGE_CONFIRM: [global_button_handler(AGE_CONFIRM), MessageHandler(filters.TEXT & ~filters.COMMAND, age_confirm)],
+            CHAR_INPUT: [global_button_handler(CHAR_INPUT), MessageHandler(filters.TEXT & ~filters.COMMAND, char_input)],
+            CHAR_CONFIRM: [global_button_handler(CHAR_CONFIRM), MessageHandler(filters.TEXT & ~filters.COMMAND, char_confirm)],
+            VOICE: [global_button_handler(VOICE), MessageHandler(filters.TEXT & ~filters.COMMAND, voice_choice)],
+            MOOD: [global_button_handler(MOOD), MessageHandler(filters.TEXT & ~filters.COMMAND, mood_choice)],
+            THEME: [global_button_handler(THEME), MessageHandler(filters.TEXT & ~filters.COMMAND, theme_choice)],
+            THEME_CUSTOM: [global_button_handler(THEME_CUSTOM), MessageHandler(filters.TEXT & ~filters.COMMAND, theme_custom_input)],
+            FINAL_CONFIRM: [global_button_handler(FINAL_CONFIRM), MessageHandler(filters.TEXT & ~filters.COMMAND, final_confirm)],
+            LULLABY_REVIEW: [global_button_handler(LULLABY_REVIEW), MessageHandler(filters.TEXT & ~filters.COMMAND, lullaby_review)],
+            EDIT_REQUEST: [global_button_handler(EDIT_REQUEST), MessageHandler(filters.TEXT & ~filters.COMMAND, edit_request)],
+            GENERATE_MUSIC: [global_button_handler(GENERATE_MUSIC), MessageHandler(filters.TEXT & ~filters.COMMAND, generate_music_button)],
+            PAYMENT_EMAIL_INPUT: [global_button_handler(PAYMENT_EMAIL_INPUT), MessageHandler(filters.TEXT & ~filters.COMMAND, payment_email_input)],
+            PROFILE_VIEW: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_view)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
