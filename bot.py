@@ -520,6 +520,27 @@ def get_all_user_ids():
     return [row[0] for row in rows]
 
 
+def get_user_summaries(limit=20):
+    with db_connection() as conn:
+        rows = conn.execute("""
+            SELECT user_id, username, nuts, lullabies, last_seen_at
+            FROM users
+            ORDER BY last_seen_at DESC, user_id
+            LIMIT ?
+        """, (limit,)).fetchall()
+
+    return [
+        {
+            "user_id": row[0],
+            "username": row[1],
+            "nuts": row[2],
+            "lullabies": row[3],
+            "last_seen_at": row[4],
+        }
+        for row in rows
+    ]
+
+
 def get_users_for_reminder():
     with db_connection() as conn:
         rows = conn.execute("""
@@ -3317,11 +3338,30 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     all_user_ids = get_all_user_ids()
     reminder_user_ids = get_users_for_reminder()
+    user_summaries = get_user_summaries()
     legacy_db_path = os.path.join(BASE_DIR, "kolybelka.db")
     legacy_users_count = 0
 
     if os.path.abspath(DB_PATH) != os.path.abspath(legacy_db_path):
         legacy_users_count = len(read_legacy_db_rows(legacy_db_path, "users"))
+
+    if user_summaries:
+        users_preview = "\n".join(
+            f"• {user['user_id']}"
+            f"{' @' + user['username'] if user['username'] else ''}"
+            f" | 🌰 {user['nuts']} | 🎵 {user['lullabies']}"
+            for user in user_summaries
+        )
+    else:
+        users_preview = "пока пусто"
+
+    empty_note = ""
+
+    if not all_user_ids:
+        empty_note = (
+            "\n\nЕсли в текущей базе 0 пользователей, рассылка технически работает, "
+            "но отправлять её некому."
+        )
 
     await update.message.reply_text(
         "👥 Пользователи бота\n\n"
@@ -3329,7 +3369,8 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Подходят для мягкого напоминания сейчас: {len(reminder_user_ids)}\n\n"
         f"Текущая SQLite база: {DB_PATH}\n"
         f"Пользователей в старой базе рядом с bot.py: {legacy_users_count}\n\n"
-        "Если в текущей базе 0 пользователей, рассылка технически работает, но отправлять её некому."
+        f"Последние пользователи:\n{users_preview}"
+        f"{empty_note}"
     )
 
 
