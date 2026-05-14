@@ -108,6 +108,20 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertFalse(safe)
         self.assertIn("не подходит", message)
 
+    def test_name_phonetics_preserves_display_name_and_singing_hint(self):
+        plain_name, stressed_name, error = bot.make_stressed_name("МарсЭль")
+
+        self.assertEqual(error, "")
+        self.assertEqual(plain_name, "Марсель")
+        self.assertEqual(stressed_name, "Марсэ́ль")
+
+    def test_name_phonetics_keeps_initial_eh(self):
+        plain_name, stressed_name, error = bot.make_stressed_name("Эмма")
+
+        self.assertEqual(error, "")
+        self.assertEqual(plain_name, "Эмма")
+        self.assertEqual(stressed_name, "Э́мма")
+
 
 if __name__ == "__main__":
     unittest.main()
