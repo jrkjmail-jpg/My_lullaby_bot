@@ -84,6 +84,45 @@ REMINDER_AFTER_DAYS = int(os.getenv("REMINDER_AFTER_DAYS", "14"))
 REMINDER_INTERVAL_HOURS = int(os.getenv("REMINDER_INTERVAL_HOURS", "24"))
 
 
+def is_path_inside(path, parent):
+    try:
+        return os.path.commonpath([
+            os.path.abspath(path),
+            os.path.abspath(parent),
+        ]) == os.path.abspath(parent)
+    except ValueError:
+        return False
+
+
+def is_db_path_configured_explicitly():
+    return bool(os.getenv("DB_PATH") or os.getenv("SHARED_DIR"))
+
+
+def is_db_path_in_project_dir():
+    return is_path_inside(DB_PATH, BASE_DIR)
+
+
+def is_db_path_in_shared_dir():
+    return is_path_inside(DB_PATH, "/app/shared")
+
+
+def get_db_persistence_warning():
+    if is_db_path_in_project_dir():
+        return (
+            "⚠️ База лежит в папке проекта. При обновлении с Git или редеплое "
+            "эта папка может пересоздаваться, и орешки будут выглядеть как сброшенные."
+        )
+
+    if is_db_path_in_shared_dir() and not is_db_path_configured_explicitly():
+        return (
+            "⚠️ База выбрана в /app/shared автоматически. На BotHost нужно включить "
+            "общее хранилище или явно задать DB_PATH=/app/shared/kolybelka.db. "
+            "Если общее хранилище не включено, /app/shared тоже может быть временной папкой."
+        )
+
+    return "✅ База настроена вне папки проекта."
+
+
 def migrate_existing_db_to_persistent_path():
     old_db_path = os.path.join(BASE_DIR, "kolybelka.db")
 
@@ -587,6 +626,10 @@ def get_database_stats():
         "base_dir": BASE_DIR,
         "shared_dir": os.getenv("SHARED_DIR", ""),
         "persistence_path": PERSISTENCE_PATH,
+        "db_path_configured": is_db_path_configured_explicitly(),
+        "db_path_in_project_dir": is_db_path_in_project_dir(),
+        "db_path_in_shared_dir": is_db_path_in_shared_dir(),
+        "db_persistence_warning": get_db_persistence_warning(),
     }
 
 
@@ -3709,11 +3752,15 @@ async def dbstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Размер файла: {stats['db_size']} байт\n"
         f"Папка проекта: {stats['base_dir']}\n"
         f"SHARED_DIR: {stats['shared_dir'] or 'не задан'}\n"
+        f"DB_PATH задан явно: {'да' if stats['db_path_configured'] else 'нет'}\n"
+        f"База внутри папки проекта: {'да' if stats['db_path_in_project_dir'] else 'нет'}\n"
+        f"База в /app/shared: {'да' if stats['db_path_in_shared_dir'] else 'нет'}\n"
         f"Файл состояния: {stats['persistence_path']}\n\n"
         f"Пользователей: {stats['users_count']}\n"
         f"Платежей: {stats['payments_count']}\n"
         f"Орешков всего на балансах: {stats['total_nuts']}\n"
-        f"Пользователей в старой базе рядом с bot.py: {legacy_users_count}"
+        f"Пользователей в старой базе рядом с bot.py: {legacy_users_count}\n\n"
+        f"{stats['db_persistence_warning']}"
     )
 
 
@@ -3921,6 +3968,7 @@ def main():
     init_db()
     print(f"SQLite DB_PATH: {DB_PATH}")
     print(f"Telegram state PERSISTENCE_PATH: {PERSISTENCE_PATH}")
+    print(get_db_persistence_warning())
 
     if not TELEGRAM_TOKEN:
         print("Ошибка: TELEGRAM_TOKEN не найден")
