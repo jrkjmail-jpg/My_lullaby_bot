@@ -107,17 +107,23 @@ def is_db_path_in_shared_dir():
 
 
 def get_db_persistence_warning():
-    if is_db_path_in_project_dir():
-        return (
-            "⚠️ База лежит в папке проекта. При обновлении с Git или редеплое "
-            "эта папка может пересоздаваться, и орешки будут выглядеть как сброшенные."
-        )
+    if is_db_path_in_shared_dir():
+        if is_db_path_configured_explicitly():
+            return (
+                "✅ База лежит в /app/shared и путь задан явно. "
+                "Теперь главное проверить, что общее хранилище BotHost переживает обновление с Git."
+            )
 
-    if is_db_path_in_shared_dir() and not is_db_path_configured_explicitly():
         return (
             "⚠️ База выбрана в /app/shared автоматически. На BotHost нужно включить "
             "общее хранилище или явно задать DB_PATH=/app/shared/kolybelka.db. "
             "Если общее хранилище не включено, /app/shared тоже может быть временной папкой."
+        )
+
+    if is_db_path_in_project_dir():
+        return (
+            "⚠️ База лежит в папке проекта. При обновлении с Git или редеплое "
+            "эта папка может пересоздаваться, и орешки будут выглядеть как сброшенные."
         )
 
     return "✅ База настроена вне папки проекта."
