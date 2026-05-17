@@ -1,3 +1,6 @@
+import os
+import shutil
+import sqlite3
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -42,6 +45,47 @@ class DatabaseHelpersTest(unittest.TestCase):
         bot.create_user_if_not_exists(same_user)
 
         self.assertEqual(bot.get_nuts(user.id), 3)
+
+    def test_database_backup_copy_preserves_balances(self):
+        user = SimpleNamespace(id=1011, username="backup_user")
+        bot.create_user_if_not_exists(user)
+        bot.add_nuts(user.id, 7)
+
+        backup_path, backup_dir = bot.create_database_backup_copy()
+
+        try:
+            ok, error = bot.validate_sqlite_backup_file(backup_path)
+            self.assertTrue(ok, error)
+
+            conn = sqlite3.connect(backup_path)
+            try:
+                nuts = conn.execute(
+                    "SELECT nuts FROM users WHERE user_id = ?",
+                    (user.id,),
+                ).fetchone()[0]
+            finally:
+                conn.close()
+
+            self.assertEqual(nuts, 7)
+        finally:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+
+    def test_restore_database_from_backup_file(self):
+        user = SimpleNamespace(id=1012, username="restore_user")
+        bot.create_user_if_not_exists(user)
+        bot.add_nuts(user.id, 5)
+        backup_path, backup_dir = bot.create_database_backup_copy()
+
+        try:
+            bot.remove_nuts(user.id, 5)
+            self.assertEqual(bot.get_nuts(user.id), 0)
+
+            previous_backup_path = bot.replace_database_with_backup_file(backup_path)
+
+            self.assertEqual(bot.get_nuts(user.id), 5)
+            self.assertTrue(os.path.exists(previous_backup_path))
+        finally:
+            shutil.rmtree(backup_dir, ignore_errors=True)
 
     def test_paid_order_is_credited_once(self):
         user = SimpleNamespace(id=1002, username="buyer")

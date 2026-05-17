@@ -82,6 +82,8 @@ MUSIC_GENERATION_TIMEOUT_SECONDS = int(os.getenv("MUSIC_GENERATION_TIMEOUT_SECON
 REMINDERS_ENABLED = os.getenv("REMINDERS_ENABLED", "1").lower() in ("1", "true", "yes", "да")
 REMINDER_AFTER_DAYS = int(os.getenv("REMINDER_AFTER_DAYS", "14"))
 REMINDER_INTERVAL_HOURS = int(os.getenv("REMINDER_INTERVAL_HOURS", "24"))
+AUTO_DB_BACKUP_ENABLED = os.getenv("AUTO_DB_BACKUP_ENABLED", "1").lower() in ("1", "true", "yes", "да")
+MAX_RESTORE_DB_BYTES = int(os.getenv("MAX_RESTORE_DB_BYTES", str(50 * 1024 * 1024)))
 
 
 def is_path_inside(path, parent):
@@ -699,6 +701,71 @@ def get_or_create_storage_probe():
         "file_error": file_error,
         "tokens_match": file_token == token,
     }
+
+
+def create_database_backup_copy():
+    if not os.path.exists(DB_PATH):
+        raise FileNotFoundError(f"SQLite база не найдена: {DB_PATH}")
+
+    temp_dir = tempfile.mkdtemp(prefix="kolybelka_db_backup_")
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    backup_path = os.path.join(temp_dir, f"kolybelka_backup_{timestamp}.db")
+
+    source = sqlite3.connect(DB_PATH)
+    target = sqlite3.connect(backup_path)
+
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+        source.close()
+
+    return backup_path, temp_dir
+
+
+def validate_sqlite_backup_file(file_path):
+    try:
+        conn = sqlite3.connect(file_path)
+        try:
+            rows = conn.execute("""
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+            """).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as error:
+        return False, f"это не SQLite-база или файл повреждён: {error}"
+
+    table_names = {row[0] for row in rows}
+    missing_tables = {"users", "payments"} - table_names
+
+    if missing_tables:
+        return False, "в файле нет нужных таблиц: " + ", ".join(sorted(missing_tables))
+
+    return True, ""
+
+
+def replace_database_with_backup_file(file_path):
+    ok, error = validate_sqlite_backup_file(file_path)
+
+    if not ok:
+        raise ValueError(error)
+
+    db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+    os.makedirs(db_dir, exist_ok=True)
+
+    previous_backup_path = None
+
+    if os.path.exists(DB_PATH):
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        previous_backup_path = os.path.join(db_dir, f"kolybelka_before_restore_{timestamp}.db")
+        shutil.copy2(DB_PATH, previous_backup_path)
+
+    shutil.copy2(file_path, DB_PATH)
+    init_db()
+
+    return previous_backup_path
 
 
 def get_users_for_reminder():
@@ -2016,6 +2083,10 @@ async def notify_payment_credited(app, result):
             "Теперь можно создать персональную колыбельную 🌙🎵"
         ),
         reply_markup=profile_keyboard(),
+    )
+    await send_database_backup_to_admins(
+        app.bot,
+        f"автобэкап после оплаты пользователя {order['user_id']}",
     )
 
 
@@ -3502,6 +3573,13 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return START
 
+        asyncio.create_task(
+            send_database_backup_to_admins(
+                context.bot,
+                f"автобэкап после списания орешка за колыбельную пользователя {user_id}",
+            )
+        )
+
         await update.message.reply_text(
             f"🌙 Всё готово!\n\n"
             f"Спасибо, что создали колыбельную в {BRAND_NAME} ✨\n\n"
@@ -3623,6 +3701,49 @@ async def send_message_safely(bot, user_id, text, reply_markup=None):
     except Exception as error:
         print(f"Не удалось отправить сообщение пользователю {user_id}:", error)
         return False
+
+
+async def send_database_backup(bot, chat_ids, reason):
+    backup_path = None
+    temp_dir = None
+
+    try:
+        backup_path, temp_dir = await asyncio.to_thread(create_database_backup_copy)
+        stats = get_database_stats()
+        caption = (
+            "🧷 Резервная копия базы Колыбелки\n\n"
+            f"Причина: {reason}\n"
+            f"Пользователей: {stats['users_count']}\n"
+            f"Платежей: {stats['payments_count']}\n"
+            f"Орешков на балансах: {stats['total_nuts']}\n\n"
+            "Сохрани этот файл. Если BotHost обнулит базу, её можно вернуть командой /restoredb."
+        )
+
+        for chat_id in chat_ids:
+            with open(backup_path, "rb") as backup_file:
+                await bot.send_document(
+                    chat_id=chat_id,
+                    document=backup_file,
+                    filename=os.path.basename(backup_path),
+                    caption=caption,
+                )
+
+            await asyncio.sleep(0.05)
+
+        return True
+    except Exception as error:
+        print("Не удалось отправить резервную копию базы:", error)
+        return False
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+async def send_database_backup_to_admins(bot, reason):
+    if not AUTO_DB_BACKUP_ENABLED or not ADMIN_IDS:
+        return False
+
+    return await send_database_backup(bot, sorted(ADMIN_IDS), reason)
 
 
 async def send_bulk_message(bot, user_ids, text, reply_markup=None, mark_reminders=False):
@@ -3862,6 +3983,95 @@ async def storagecheck_command(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
+async def backupdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    await update.message.reply_text("🧷 Готовлю резервную копию базы...")
+
+    ok = await send_database_backup(
+        context.bot,
+        [update.effective_chat.id],
+        "ручная команда /backupdb",
+    )
+
+    if not ok:
+        await update.message.reply_text(
+            "⚠️ Не получилось отправить резервную копию. Проверь /dbstatus и логи BotHost."
+        )
+
+
+async def restoredb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    context.user_data["awaiting_db_restore"] = True
+
+    await update.message.reply_text(
+        "🧷 Восстановление базы\n\n"
+        "Теперь отправь следующим сообщением файл резервной копии .db.\n\n"
+        "Важно: текущая база перед заменой будет сохранена рядом как запасной файл."
+    )
+
+
+async def restoredb_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+
+    if not context.user_data.get("awaiting_db_restore"):
+        return
+
+    document = update.message.document
+
+    if not document:
+        return
+
+    if document.file_size and document.file_size > MAX_RESTORE_DB_BYTES:
+        await update.message.reply_text(
+            "⚠️ Файл слишком большой для восстановления базы."
+        )
+        return
+
+    temp_dir = tempfile.mkdtemp(prefix="kolybelka_db_restore_")
+    restore_path = os.path.join(temp_dir, document.file_name or "kolybelka_restore.db")
+
+    try:
+        telegram_file = await document.get_file()
+        await telegram_file.download_to_drive(restore_path)
+
+        previous_backup_path = await asyncio.to_thread(
+            replace_database_with_backup_file,
+            restore_path,
+        )
+        context.user_data.pop("awaiting_db_restore", None)
+
+        stats = get_database_stats()
+        await update.message.reply_text(
+            "✅ База восстановлена.\n\n"
+            f"Текущая база: {stats['db_path']}\n"
+            f"Пользователей: {stats['users_count']}\n"
+            f"Платежей: {stats['payments_count']}\n"
+            f"Орешков на балансах: {stats['total_nuts']}\n"
+            f"Старая база сохранена: {previous_backup_path or 'старой базы не было'}"
+        )
+
+        asyncio.create_task(
+            send_database_backup_to_admins(
+                context.bot,
+                "автобэкап после восстановления базы",
+            )
+        )
+    except Exception as error:
+        await update.message.reply_text(
+            "⚠️ Не получилось восстановить базу.\n\n"
+            f"Причина: {error}"
+        )
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 async def stopreminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     create_user_if_not_exists(update.effective_user)
     set_reminders_enabled(update.effective_user.id, False)
@@ -3936,6 +4146,12 @@ async def addnuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Начислено: {amount}\n"
         f"Баланс: {balance}"
     )
+    asyncio.create_task(
+        send_database_backup_to_admins(
+            context.bot,
+            f"автобэкап после ручного начисления пользователю {target_user_id}",
+        )
+    )
 
     try:
         await context.bot.send_message(
@@ -3996,6 +4212,12 @@ async def removenuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"Пользователь: {target_user_id}\n"
         f"Списано: {amount}\n"
         f"Баланс: {balance}"
+    )
+    asyncio.create_task(
+        send_database_backup_to_admins(
+            context.bot,
+            f"автобэкап после ручного списания у пользователя {target_user_id}",
+        )
     )
 
     try:
@@ -4170,6 +4392,9 @@ def main():
     app.add_handler(CommandHandler("users", users_command), group=-1)
     app.add_handler(CommandHandler("dbstatus", dbstatus_command), group=-1)
     app.add_handler(CommandHandler("storagecheck", storagecheck_command), group=-1)
+    app.add_handler(CommandHandler("backupdb", backupdb_command), group=-1)
+    app.add_handler(CommandHandler("restoredb", restoredb_command), group=-1)
+    app.add_handler(MessageHandler(filters.Document.ALL, restoredb_document_handler), group=-1)
     app.add_handler(CommandHandler("stopreminders", stopreminders_command), group=-1)
     app.add_handler(CommandHandler("startreminders", startreminders_command), group=-1)
     app.add_handler(CommandHandler("addnuts", addnuts_command), group=-1)
