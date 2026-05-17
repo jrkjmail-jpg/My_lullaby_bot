@@ -382,7 +382,6 @@ def profile_keyboard():
     return keyboard([
         ["🌰 Купить орешки"],
         ["🌙 Создать новую колыбельную"],
-        ["🏠 Главное меню"],
     ], with_nav=False)
 
 
