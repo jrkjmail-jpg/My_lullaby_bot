@@ -985,6 +985,19 @@ def get_support_user_by_admin_message(chat_id, message_id):
     return row[0] if row else None
 
 
+def get_last_support_user_for_admin_chat(chat_id):
+    with db_connection() as conn:
+        row = conn.execute("""
+            SELECT user_id
+            FROM support_admin_messages
+            WHERE chat_id = ?
+            ORDER BY created_at DESC, message_id DESC
+            LIMIT 1
+        """, (chat_id,)).fetchone()
+
+    return row[0] if row else None
+
+
 def get_users_for_reminder():
     with db_connection() as conn:
         rows = conn.execute("""
@@ -2734,6 +2747,43 @@ async def notify_support_admins(context: ContextTypes.DEFAULT_TYPE, user, messag
     return sent_any
 
 
+async def forward_support_attachment_to_admins(context: ContextTypes.DEFAULT_TYPE, user, update: Update, caption):
+    if not SUPPORT_ADMIN_CHAT_ID:
+        return False
+
+    try:
+        sent_message = await context.bot.forward_message(
+            chat_id=SUPPORT_ADMIN_CHAT_ID,
+            from_chat_id=update.effective_chat.id,
+            message_id=update.message.message_id,
+        )
+        remember_support_admin_message(
+            SUPPORT_ADMIN_CHAT_ID,
+            sent_message.message_id,
+            user.id,
+        )
+
+        info_message = await context.bot.send_message(
+            chat_id=SUPPORT_ADMIN_CHAT_ID,
+            text=(
+                "📎 Вложение от пользователя поддержки\n\n"
+                f"Пользователь: {user.id}"
+                f"{' (@' + user.username + ')' if user.username else ''}\n"
+                f"Комментарий: {caption or 'без подписи'}\n\n"
+                "Чтобы ответить, нажми «Ответить» на это сообщение или на пересланное вложение."
+            ),
+        )
+        remember_support_admin_message(
+            SUPPORT_ADMIN_CHAT_ID,
+            info_message.message_id,
+            user.id,
+        )
+        return True
+    except Exception as error:
+        print("Поддержка: не удалось переслать вложение в группу:", error)
+        return False
+
+
 async def process_support_message(update: Update, context: ContextTypes.DEFAULT_TYPE, message):
     user = update.effective_user
     user_id = user.id
@@ -2823,6 +2873,36 @@ async def support_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await process_support_message(update, context, text)
 
 
+async def support_attachment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    if not user:
+        return SUPPORT_CHAT
+
+    create_user_if_not_exists(user)
+    ensure_support_thread(user.id)
+    caption = update.message.caption or ""
+    attachment_note = caption or "Пользователь отправил вложение без подписи"
+    log_support_message(user.id, "user", f"[вложение] {attachment_note}")
+    set_support_status(user.id, "admin")
+
+    forwarded = await forward_support_attachment_to_admins(
+        context,
+        user,
+        update,
+        caption,
+    )
+
+    await update.message.reply_text(
+        "📎 Получила файл и передала администратору."
+        if forwarded else
+        "📎 Получила файл, но не смогла переслать его администратору. Напиши, пожалуйста, вопрос текстом.",
+        reply_markup=support_keyboard(),
+    )
+
+    return SUPPORT_CHAT
+
+
 async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = get_command_payload(update)
     return await begin_support_chat(update, context, first_message=message or None)
@@ -2881,18 +2961,28 @@ async def support_group_reply_handler(update: Update, context: ContextTypes.DEFA
     if update.effective_chat.id != SUPPORT_ADMIN_CHAT_ID:
         return
 
-    if not update.message or not update.message.reply_to_message:
+    if not update.message:
         return
 
     if update.effective_user and not is_admin(update.effective_user.id):
         return
 
-    target_user_id = get_support_user_by_admin_message(
-        update.effective_chat.id,
-        update.message.reply_to_message.message_id,
-    )
+    target_user_id = None
+
+    if update.message.reply_to_message:
+        target_user_id = get_support_user_by_admin_message(
+            update.effective_chat.id,
+            update.message.reply_to_message.message_id,
+        )
 
     if not target_user_id:
+        target_user_id = get_last_support_user_for_admin_chat(update.effective_chat.id)
+
+    if not target_user_id:
+        await update.message.reply_text(
+            "💬 Не поняла, кому ответить. Нажми «Ответить» на обращение пользователя "
+            "или используй /reply user_id текст."
+        )
         return
 
     message = (update.message.text or "").strip()
@@ -4993,7 +5083,10 @@ def main():
             GENERATE_MUSIC: [global_button_handler(GENERATE_MUSIC), MessageHandler(filters.TEXT & ~filters.COMMAND, generate_music_button)],
             PAYMENT_EMAIL_INPUT: [global_button_handler(PAYMENT_EMAIL_INPUT), MessageHandler(filters.TEXT & ~filters.COMMAND, payment_email_input)],
             PROFILE_VIEW: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_view)],
-            SUPPORT_CHAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, support_chat)],
+            SUPPORT_CHAT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, support_chat),
+                MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, support_attachment_handler),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),

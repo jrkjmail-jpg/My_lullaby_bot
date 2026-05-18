@@ -122,6 +122,12 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertEqual(bot.get_support_user_by_admin_message(-100123, 55), 1014)
         self.assertIsNone(bot.get_support_user_by_admin_message(-100123, 56))
 
+    def test_last_support_user_for_admin_chat(self):
+        bot.remember_support_admin_message(-100124, 10, 1015)
+        bot.remember_support_admin_message(-100124, 11, 1016)
+
+        self.assertEqual(bot.get_last_support_user_for_admin_chat(-100124), 1016)
+
     def test_paid_order_is_credited_once(self):
         user = SimpleNamespace(id=1002, username="buyer")
         bot.create_user_if_not_exists(user)
