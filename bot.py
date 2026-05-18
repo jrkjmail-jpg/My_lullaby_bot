@@ -56,6 +56,8 @@ SUNO_BASE_URL = "https://api.sunoapi.org"
 YOOKASSA_BASE_URL = "https://api.yookassa.ru/v3"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BOT_HOST_DATA_DIR = "/app/data"
+BOT_HOST_SHARED_DIR = "/app/shared"
 
 
 def get_default_db_path():
@@ -64,10 +66,8 @@ def get_default_db_path():
     if shared_dir:
         return os.path.join(shared_dir, "kolybelka.db")
 
-    bot_host_shared_dir = "/app/shared"
-
-    if os.path.isdir(bot_host_shared_dir) or os.path.isdir("/app"):
-        return os.path.join(bot_host_shared_dir, "kolybelka.db")
+    if os.path.isdir(BOT_HOST_DATA_DIR) or os.path.isdir("/app"):
+        return os.path.join(BOT_HOST_DATA_DIR, "kolybelka.db")
 
     return os.path.join(BASE_DIR, "kolybelka.db")
 
@@ -105,21 +105,30 @@ def is_db_path_in_project_dir():
 
 
 def is_db_path_in_shared_dir():
-    return is_path_inside(DB_PATH, "/app/shared")
+    return is_path_inside(DB_PATH, BOT_HOST_SHARED_DIR)
+
+
+def is_db_path_in_data_dir():
+    return is_path_inside(DB_PATH, BOT_HOST_DATA_DIR)
 
 
 def get_db_persistence_warning():
-    if is_db_path_in_shared_dir():
+    if is_db_path_in_data_dir():
         if is_db_path_configured_explicitly():
             return (
-                "✅ База лежит в /app/shared и путь задан явно. "
-                "Теперь главное проверить, что общее хранилище BotHost переживает обновление с Git."
+                "✅ База лежит в /app/data и путь задан явно. "
+                "Это папка BotHost для сохранения базы между обновлениями."
             )
 
         return (
-            "⚠️ База выбрана в /app/shared автоматически. На BotHost нужно включить "
-            "общее хранилище или явно задать DB_PATH=/app/shared/kolybelka.db. "
-            "Если общее хранилище не включено, /app/shared тоже может быть временной папкой."
+            "✅ База выбрана в /app/data автоматически. "
+            "Для полной ясности можно явно задать DB_PATH=/app/data/kolybelka.db."
+        )
+
+    if is_db_path_in_shared_dir():
+        return (
+            "⚠️ База лежит в /app/shared. По документации BotHost базу нужно хранить "
+            "в /app/data. Лучше задать DB_PATH=/app/data/kolybelka.db."
         )
 
     if is_db_path_in_project_dir():
@@ -131,21 +140,40 @@ def get_db_persistence_warning():
     return "✅ База настроена вне папки проекта."
 
 
+def get_legacy_db_paths():
+    candidates = [
+        os.path.join(BOT_HOST_SHARED_DIR, "kolybelka.db"),
+        os.path.join(BASE_DIR, "kolybelka.db"),
+    ]
+    current_path = os.path.abspath(DB_PATH)
+    unique_paths = []
+
+    for path in candidates:
+        abs_path = os.path.abspath(path)
+
+        if abs_path == current_path or abs_path in unique_paths:
+            continue
+
+        unique_paths.append(abs_path)
+
+    return unique_paths
+
+
 def migrate_existing_db_to_persistent_path():
-    old_db_path = os.path.join(BASE_DIR, "kolybelka.db")
-
-    if os.path.abspath(DB_PATH) == os.path.abspath(old_db_path):
+    if os.path.exists(DB_PATH):
         return
 
-    if not os.path.exists(old_db_path) or os.path.exists(DB_PATH):
-        return
+    for old_db_path in get_legacy_db_paths():
+        if not os.path.exists(old_db_path):
+            continue
 
-    try:
-        os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
-        shutil.copy2(old_db_path, DB_PATH)
-        print(f"SQLite база перенесена в постоянное хранилище: {DB_PATH}")
-    except OSError as error:
-        print("Не удалось перенести SQLite базу в постоянное хранилище:", error)
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
+            shutil.copy2(old_db_path, DB_PATH)
+            print(f"SQLite база перенесена в постоянное хранилище: {DB_PATH}")
+            return
+        except OSError as error:
+            print("Не удалось перенести SQLite базу в постоянное хранилище:", error)
 
 
 def read_legacy_db_rows(db_path, table_name):
@@ -173,61 +201,40 @@ def read_legacy_db_rows(db_path, table_name):
 
 
 def merge_legacy_db_into_current_db():
-    old_db_path = os.path.join(BASE_DIR, "kolybelka.db")
+    legacy_sources = []
 
-    if os.path.abspath(DB_PATH) == os.path.abspath(old_db_path):
-        return
+    for old_db_path in get_legacy_db_paths():
+        if not os.path.exists(old_db_path):
+            continue
 
-    if not os.path.exists(old_db_path):
-        return
+        legacy_users = read_legacy_db_rows(old_db_path, "users")
+        legacy_payments = read_legacy_db_rows(old_db_path, "payments")
 
-    legacy_users = read_legacy_db_rows(old_db_path, "users")
-    legacy_payments = read_legacy_db_rows(old_db_path, "payments")
+        if legacy_users or legacy_payments:
+            legacy_sources.append((old_db_path, legacy_users, legacy_payments))
 
-    if not legacy_users and not legacy_payments:
+    if not legacy_sources:
         return
 
     imported_users = 0
     imported_payments = 0
 
     with db_connection() as conn:
-        for user in legacy_users:
-            user_id = user.get("user_id")
+        for old_db_path, legacy_users, legacy_payments in legacy_sources:
+            for user in legacy_users:
+                user_id = user.get("user_id")
 
-            if user_id is None:
-                continue
+                if user_id is None:
+                    continue
 
-            cur = conn.execute("""
-                INSERT OR IGNORE INTO users (
-                    user_id, username, nuts, lullabies, last_seen_at,
-                    last_lullaby_at, reminders_enabled, last_reminder_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                user_id,
-                user.get("username"),
-                user.get("nuts", 0) or 0,
-                user.get("lullabies", 0) or 0,
-                user.get("last_seen_at"),
-                user.get("last_lullaby_at"),
-                user.get("reminders_enabled", 1),
-                user.get("last_reminder_at"),
-            ))
-
-            if cur.rowcount:
-                imported_users += 1
-            else:
-                conn.execute("""
-                    UPDATE users
-                    SET username = COALESCE(username, ?),
-                        nuts = MAX(nuts, ?),
-                        lullabies = MAX(lullabies, ?),
-                        last_seen_at = COALESCE(last_seen_at, ?),
-                        last_lullaby_at = COALESCE(last_lullaby_at, ?),
-                        reminders_enabled = COALESCE(reminders_enabled, ?),
-                        last_reminder_at = COALESCE(last_reminder_at, ?)
-                    WHERE user_id = ?
+                cur = conn.execute("""
+                    INSERT OR IGNORE INTO users (
+                        user_id, username, nuts, lullabies, last_seen_at,
+                        last_lullaby_at, reminders_enabled, last_reminder_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
+                    user_id,
                     user.get("username"),
                     user.get("nuts", 0) or 0,
                     user.get("lullabies", 0) or 0,
@@ -235,42 +242,65 @@ def merge_legacy_db_into_current_db():
                     user.get("last_lullaby_at"),
                     user.get("reminders_enabled", 1),
                     user.get("last_reminder_at"),
-                    user_id,
                 ))
 
-        for payment in legacy_payments:
-            local_payment_id = payment.get("local_payment_id")
+                if cur.rowcount:
+                    imported_users += 1
+                else:
+                    conn.execute("""
+                        UPDATE users
+                        SET username = COALESCE(username, ?),
+                            nuts = MAX(nuts, ?),
+                            lullabies = MAX(lullabies, ?),
+                            last_seen_at = COALESCE(last_seen_at, ?),
+                            last_lullaby_at = COALESCE(last_lullaby_at, ?),
+                            reminders_enabled = COALESCE(reminders_enabled, ?),
+                            last_reminder_at = COALESCE(last_reminder_at, ?)
+                        WHERE user_id = ?
+                    """, (
+                        user.get("username"),
+                        user.get("nuts", 0) or 0,
+                        user.get("lullabies", 0) or 0,
+                        user.get("last_seen_at"),
+                        user.get("last_lullaby_at"),
+                        user.get("reminders_enabled", 1),
+                        user.get("last_reminder_at"),
+                        user_id,
+                    ))
 
-            if not local_payment_id or payment.get("user_id") is None:
-                continue
+            for payment in legacy_payments:
+                local_payment_id = payment.get("local_payment_id")
 
-            cur = conn.execute("""
-                INSERT OR IGNORE INTO payments (
-                    local_payment_id, yookassa_payment_id, user_id, package_key,
-                    package_title, nuts, lullabies, amount_value, currency, status,
-                    confirmation_url, customer_email, credited, created_at, paid_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                local_payment_id,
-                payment.get("yookassa_payment_id"),
-                payment.get("user_id"),
-                payment.get("package_key", ""),
-                payment.get("package_title", ""),
-                payment.get("nuts", 0) or 0,
-                payment.get("lullabies", 0) or 0,
-                payment.get("amount_value", "0.00"),
-                payment.get("currency", "RUB"),
-                payment.get("status", "created"),
-                payment.get("confirmation_url"),
-                payment.get("customer_email"),
-                payment.get("credited", 0) or 0,
-                payment.get("created_at"),
-                payment.get("paid_at"),
-            ))
+                if not local_payment_id or payment.get("user_id") is None:
+                    continue
 
-            if cur.rowcount:
-                imported_payments += 1
+                cur = conn.execute("""
+                    INSERT OR IGNORE INTO payments (
+                        local_payment_id, yookassa_payment_id, user_id, package_key,
+                        package_title, nuts, lullabies, amount_value, currency, status,
+                        confirmation_url, customer_email, credited, created_at, paid_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    local_payment_id,
+                    payment.get("yookassa_payment_id"),
+                    payment.get("user_id"),
+                    payment.get("package_key", ""),
+                    payment.get("package_title", ""),
+                    payment.get("nuts", 0) or 0,
+                    payment.get("lullabies", 0) or 0,
+                    payment.get("amount_value", "0.00"),
+                    payment.get("currency", "RUB"),
+                    payment.get("status", "created"),
+                    payment.get("confirmation_url"),
+                    payment.get("customer_email"),
+                    payment.get("credited", 0) or 0,
+                    payment.get("created_at"),
+                    payment.get("paid_at"),
+                ))
+
+                if cur.rowcount:
+                    imported_payments += 1
 
     if imported_users or imported_payments:
         print(
@@ -645,6 +675,7 @@ def get_database_stats():
         "db_path_configured": is_db_path_configured_explicitly(),
         "db_path_in_project_dir": is_db_path_in_project_dir(),
         "db_path_in_shared_dir": is_db_path_in_shared_dir(),
+        "db_path_in_data_dir": is_db_path_in_data_dir(),
         "db_persistence_warning": get_db_persistence_warning(),
     }
 
@@ -3887,11 +3918,10 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     all_user_ids = get_all_user_ids()
     reminder_user_ids = get_users_for_reminder()
     user_summaries = get_user_summaries()
-    legacy_db_path = os.path.join(BASE_DIR, "kolybelka.db")
-    legacy_users_count = 0
-
-    if os.path.abspath(DB_PATH) != os.path.abspath(legacy_db_path):
-        legacy_users_count = len(read_legacy_db_rows(legacy_db_path, "users"))
+    legacy_users_count = sum(
+        len(read_legacy_db_rows(path, "users"))
+        for path in get_legacy_db_paths()
+    )
 
     if user_summaries:
         users_preview = "\n".join(
@@ -3916,7 +3946,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Всего в базе: {len(all_user_ids)}\n"
         f"Подходят для мягкого напоминания сейчас: {len(reminder_user_ids)}\n\n"
         f"Текущая SQLite база: {DB_PATH}\n"
-        f"Пользователей в старой базе рядом с bot.py: {legacy_users_count}\n\n"
+        f"Пользователей в старых базах: {legacy_users_count}\n\n"
         f"Последние пользователи:\n{users_preview}"
         f"{empty_note}"
     )
@@ -3928,11 +3958,10 @@ async def dbstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     stats = get_database_stats()
-    legacy_db_path = os.path.join(BASE_DIR, "kolybelka.db")
-    legacy_users_count = 0
-
-    if os.path.abspath(DB_PATH) != os.path.abspath(legacy_db_path):
-        legacy_users_count = len(read_legacy_db_rows(legacy_db_path, "users"))
+    legacy_users_count = sum(
+        len(read_legacy_db_rows(path, "users"))
+        for path in get_legacy_db_paths()
+    )
 
     await update.message.reply_text(
         "🗄 SQLite база\n\n"
@@ -3943,12 +3972,13 @@ async def dbstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"SHARED_DIR: {stats['shared_dir'] or 'не задан'}\n"
         f"DB_PATH задан явно: {'да' if stats['db_path_configured'] else 'нет'}\n"
         f"База внутри папки проекта: {'да' if stats['db_path_in_project_dir'] else 'нет'}\n"
+        f"База в /app/data: {'да' if stats['db_path_in_data_dir'] else 'нет'}\n"
         f"База в /app/shared: {'да' if stats['db_path_in_shared_dir'] else 'нет'}\n"
         f"Файл состояния: {stats['persistence_path']}\n\n"
         f"Пользователей: {stats['users_count']}\n"
         f"Платежей: {stats['payments_count']}\n"
         f"Орешков всего на балансах: {stats['total_nuts']}\n"
-        f"Пользователей в старой базе рядом с bot.py: {legacy_users_count}\n\n"
+        f"Пользователей в старых базах: {legacy_users_count}\n\n"
         f"{stats['db_persistence_warning']}"
     )
 
