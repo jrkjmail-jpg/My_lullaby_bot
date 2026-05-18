@@ -85,6 +85,8 @@ REMINDER_INTERVAL_HOURS = int(os.getenv("REMINDER_INTERVAL_HOURS", "24"))
 AUTO_DB_BACKUP_ENABLED = os.getenv("AUTO_DB_BACKUP_ENABLED", "1").lower() in ("1", "true", "yes", "да")
 AUTO_DB_BACKUP_INTERVAL_HOURS = int(os.getenv("AUTO_DB_BACKUP_INTERVAL_HOURS", "6"))
 MAX_RESTORE_DB_BYTES = int(os.getenv("MAX_RESTORE_DB_BYTES", str(50 * 1024 * 1024)))
+SUPPORT_AI_ENABLED = os.getenv("SUPPORT_AI_ENABLED", "1").lower() in ("1", "true", "yes", "да")
+SUPPORT_AI_MODEL = os.getenv("SUPPORT_AI_MODEL", "gpt-5.2")
 
 
 def is_path_inside(path, parent):
@@ -356,7 +358,8 @@ NUT_PACKAGES = {
     GENERATE_MUSIC,
     PAYMENT_EMAIL_INPUT,
     PROFILE_VIEW,
-) = range(18)
+    SUPPORT_CHAT,
+) = range(19)
 
 
 BAD_WORDS = [
@@ -408,6 +411,7 @@ def main_menu_keyboard():
     return keyboard([
         ["🌙 Создать новую колыбельную"],
         ["👤 Личный кабинет"],
+        ["💬 Поддержка"],
     ], with_nav=False)
 
 
@@ -415,6 +419,7 @@ def profile_keyboard():
     return keyboard([
         ["🌰 Купить орешки"],
         ["🌙 Создать новую колыбельную"],
+        ["💬 Поддержка"],
     ], with_nav=False)
 
 
@@ -422,7 +427,19 @@ def flow_profile_keyboard():
     return ReplyKeyboardMarkup(
         [
             ["🌰 Купить орешки"],
+            ["💬 Поддержка"],
             ["⬅️ Вернуться назад"],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
+def support_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            ["✅ Завершить поддержку"],
+            ["🏠 Главное меню"],
         ],
         resize_keyboard=True,
         one_time_keyboard=False,
@@ -549,6 +566,26 @@ def init_db():
                 token TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 checked_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS support_threads (
+                user_id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'ai',
+                last_message_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                escalated_at TEXT,
+                closed_at TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS support_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                sender TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
@@ -842,6 +879,75 @@ def should_send_auto_db_backup():
 
     seconds_since_backup = time.time() - get_last_auto_backup_at()
     return seconds_since_backup >= AUTO_DB_BACKUP_INTERVAL_HOURS * 3600
+
+
+def ensure_support_thread(user_id, status="ai"):
+    create_user_id_if_not_exists(user_id)
+
+    with db_connection() as conn:
+        conn.execute("""
+            INSERT INTO support_threads (user_id, status)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO NOTHING
+        """, (user_id, status))
+        conn.execute("""
+            UPDATE support_threads
+            SET last_message_at = CURRENT_TIMESTAMP,
+                closed_at = NULL
+            WHERE user_id = ?
+        """, (user_id,))
+
+
+def log_support_message(user_id, sender, message):
+    ensure_support_thread(user_id)
+
+    with db_connection() as conn:
+        conn.execute("""
+            INSERT INTO support_messages (user_id, sender, message)
+            VALUES (?, ?, ?)
+        """, (user_id, sender, message))
+        conn.execute("""
+            UPDATE support_threads
+            SET last_message_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+        """, (user_id,))
+
+
+def set_support_status(user_id, status):
+    create_user_id_if_not_exists(user_id)
+
+    with db_connection() as conn:
+        conn.execute("""
+            INSERT INTO support_threads (user_id, status)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                status = excluded.status,
+                last_message_at = CURRENT_TIMESTAMP,
+                escalated_at = CASE
+                    WHEN excluded.status = 'admin' THEN CURRENT_TIMESTAMP
+                    ELSE support_threads.escalated_at
+                END,
+                closed_at = CASE
+                    WHEN excluded.status = 'closed' THEN CURRENT_TIMESTAMP
+                    ELSE NULL
+                END
+        """, (user_id, status))
+
+
+def get_recent_support_messages(user_id, limit=8):
+    with db_connection() as conn:
+        rows = conn.execute("""
+            SELECT sender, message
+            FROM support_messages
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+        """, (user_id, limit)).fetchall()
+
+    return [
+        {"sender": row[0], "message": row[1]}
+        for row in reversed(rows)
+    ]
 
 
 def get_users_for_reminder():
@@ -1158,6 +1264,14 @@ def is_change(text):
 
 def is_home(text):
     return text in ["🏠 Главное меню", "Главное меню"]
+
+
+def is_support(text):
+    return text in ["💬 Поддержка", "Поддержка", "/support"]
+
+
+def is_finish_support(text):
+    return text in ["✅ Завершить поддержку", "Завершить поддержку"]
 
 
 def is_create_lullaby(text):
@@ -1504,6 +1618,117 @@ def get_openai_client():
         OPENAI_CLIENT = OpenAI(api_key=OPENAI_API_KEY)
 
     return OPENAI_CLIENT
+
+
+def parse_json_response(text):
+    clean_text = text.strip()
+
+    if clean_text.startswith("```"):
+        clean_text = re.sub(r"^```(?:json)?", "", clean_text).strip()
+        clean_text = re.sub(r"```$", "", clean_text).strip()
+
+    try:
+        return json.loads(clean_text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", clean_text, flags=re.DOTALL)
+
+        if not match:
+            raise
+
+        return json.loads(match.group(0))
+
+
+def support_needs_admin_by_keywords(message):
+    lowered = message.lower()
+    keywords = [
+        "орешки не пришли",
+        "не начислились",
+        "не начислили",
+        "оплатил",
+        "оплатила",
+        "деньги списали",
+        "списались деньги",
+        "возврат",
+        "вернуть деньги",
+        "ошибка оплаты",
+        "не работает оплата",
+        "завис",
+        "зависла",
+        "админ",
+        "оператор",
+        "человек",
+    ]
+
+    return any(keyword in lowered for keyword in keywords)
+
+
+def ask_support_ai(user_id, user_message):
+    recent_messages = get_recent_support_messages(user_id)
+    history = "\n".join(
+        f"{item['sender']}: {item['message']}"
+        for item in recent_messages
+    ) or "пока нет истории"
+    nuts = get_nuts(user_id)
+    lullabies = get_lullabies(user_id)
+    keyword_escalation = support_needs_admin_by_keywords(user_message)
+
+    prompt = f"""
+Ты ИИ-поддержка Telegram-бота "{BRAND_NAME}".
+
+Что делает бот:
+- создаёт персональные музыкальные колыбельные для детей;
+- 1 орешек = 1 персональная музыкальная колыбельная;
+- цены: 1 орешек 349 ₽, 2 орешка 499 ₽, 3 орешка 599 ₽;
+- орешек списывается только после отправки готовой музыкальной колыбельной;
+- если текст или музыка не создались из-за ошибки или таймаута, орешек не списывается;
+- оплата начисляется автоматически через webhook ЮKassa.
+
+Данные пользователя:
+- user_id: {user_id}
+- баланс орешков: {nuts}
+- создано колыбельных: {lullabies}
+
+История последних сообщений поддержки:
+{history}
+
+Новое сообщение пользователя:
+{user_message}
+
+Отвечай мягко, коротко и по делу, на русском.
+Не обещай вручную начислить орешки, вернуть деньги или проверить платёж сам.
+Если нужен доступ к платежам, балансу, логам, возврату, ручному начислению, багам, зависшей песне,
+или пользователь просит живого человека, обязательно ставь escalate=true.
+Если в поле keyword_escalation ниже true, тоже ставь escalate=true.
+
+keyword_escalation: {str(keyword_escalation).lower()}
+
+Верни строго JSON без markdown:
+{{
+  "answer": "ответ пользователю",
+  "escalate": true или false,
+  "reason": "короткая причина для админа"
+}}
+"""
+
+    response = get_openai_client().responses.create(
+        model=SUPPORT_AI_MODEL,
+        input=prompt,
+    )
+    data = parse_json_response(response.output_text)
+
+    answer = str(data.get("answer", "")).strip()
+    escalate = bool(data.get("escalate"))
+    reason = str(data.get("reason", "")).strip()
+
+    if not answer:
+        answer = "Я передам вопрос администратору, чтобы мы всё спокойно проверили."
+        escalate = True
+
+    return {
+        "answer": answer,
+        "escalate": escalate,
+        "reason": reason or "ИИ решил подключить администратора",
+    }
 
 
 def get_age_context(data):
@@ -2403,6 +2628,191 @@ async def begin_lullaby_creation(update: Update, context: ContextTypes.DEFAULT_T
     return NAME_INPUT
 
 
+async def begin_support_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, first_message=None):
+    create_user_if_not_exists(update.effective_user)
+    ensure_support_thread(update.effective_user.id)
+
+    if first_message:
+        return await process_support_message(update, context, first_message)
+
+    await update.message.reply_text(
+        "💬 Поддержка Колыбелки\n\n"
+        "Напиши вопрос одним сообщением. Сначала попробую помочь я, "
+        "а если нужен доступ к оплате, балансу или логам — передам администратору.",
+        reply_markup=support_keyboard()
+    )
+
+    return SUPPORT_CHAT
+
+
+async def notify_support_admins(context: ContextTypes.DEFAULT_TYPE, user, message, reason, ai_answer=None):
+    if not ADMIN_IDS:
+        print("Поддержка: нет ADMIN_IDS, некому передать обращение")
+        return False
+
+    username = f"@{user.username}" if user.username else "без username"
+    text = (
+        "💬 Обращение в поддержку\n\n"
+        f"Пользователь: {user.id} ({username})\n"
+        f"Баланс: {get_nuts(user.id)} орешков\n"
+        f"Причина передачи: {reason or 'нужен администратор'}\n\n"
+        f"Сообщение:\n{message}\n\n"
+    )
+
+    if ai_answer:
+        text += f"Ответ ИИ пользователю:\n{ai_answer}\n\n"
+
+    text += f"Ответить пользователю:\n/reply {user.id} текст ответа"
+
+    sent_any = False
+
+    for admin_id in sorted(ADMIN_IDS):
+        ok = await send_message_safely(context.bot, admin_id, text)
+        sent_any = sent_any or ok
+
+    return sent_any
+
+
+async def process_support_message(update: Update, context: ContextTypes.DEFAULT_TYPE, message):
+    user = update.effective_user
+    user_id = user.id
+    message = message.strip()
+
+    if not message:
+        await update.message.reply_text(
+            "💬 Напиши вопрос текстом, и я помогу.",
+            reply_markup=support_keyboard()
+        )
+        return SUPPORT_CHAT
+
+    log_support_message(user_id, "user", message)
+
+    if not SUPPORT_AI_ENABLED:
+        set_support_status(user_id, "admin")
+        await update.message.reply_text(
+            "💬 Передала вопрос администратору. Он ответит здесь в чате.",
+            reply_markup=support_keyboard()
+        )
+        await notify_support_admins(context, user, message, "ИИ-поддержка отключена")
+        return SUPPORT_CHAT
+
+    try:
+        result = await asyncio.to_thread(ask_support_ai, user_id, message)
+    except Exception as error:
+        print("Ошибка ИИ-поддержки:", error)
+        set_support_status(user_id, "admin")
+        await update.message.reply_text(
+            "💬 Я не смогла уверенно ответить автоматически, поэтому передала вопрос администратору.\n\n"
+            "Он ответит здесь в чате.",
+            reply_markup=support_keyboard()
+        )
+        await notify_support_admins(context, user, message, f"ошибка ИИ: {error}")
+        return SUPPORT_CHAT
+
+    answer = result["answer"]
+    log_support_message(user_id, "ai", answer)
+    await update.message.reply_text(answer, reply_markup=support_keyboard())
+
+    if result["escalate"]:
+        set_support_status(user_id, "admin")
+        await update.message.reply_text(
+            "💬 Я передала вопрос администратору, чтобы он проверил вручную и ответил здесь.",
+            reply_markup=support_keyboard()
+        )
+        await notify_support_admins(
+            context,
+            user,
+            message,
+            result["reason"],
+            ai_answer=answer,
+        )
+    else:
+        set_support_status(user_id, "ai")
+
+    return SUPPORT_CHAT
+
+
+async def support_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text or ""
+    user_id = update.effective_user.id
+
+    if is_restart(text) or is_home(text):
+        return await show_main_menu(update, context)
+
+    if text == "👤 Личный кабинет":
+        return await show_profile(update, user_id)
+
+    if text == "🌰 Купить орешки":
+        return await show_buy_nuts_menu(update)
+
+    if text in NUT_PACKAGES:
+        return await ask_payment_email(update, context, text)
+
+    if is_create_lullaby(text):
+        return await begin_lullaby_creation(update, context)
+
+    if is_finish_support(text):
+        set_support_status(user_id, "closed")
+        await update.message.reply_text(
+            "✅ Поддержка закрыта. Если что-то понадобится — нажми «💬 Поддержка» снова.",
+            reply_markup=main_menu_keyboard()
+        )
+        return START
+
+    return await process_support_message(update, context, text)
+
+
+async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = get_command_payload(update)
+    return await begin_support_chat(update, context, first_message=message or None)
+
+
+async def support_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await begin_support_chat(update, context)
+
+
+async def support_reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "💬 Формат ответа:\n"
+            "/reply user_id текст\n\n"
+            "Например:\n"
+            "/reply 123456789 Проверили оплату, орешки начислены."
+        )
+        return
+
+    try:
+        target_user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("💬 user_id должен быть числом.")
+        return
+
+    message = " ".join(context.args[1:]).strip()
+
+    if not message:
+        await update.message.reply_text("💬 Напиши текст ответа после user_id.")
+        return
+
+    create_user_id_if_not_exists(target_user_id)
+    log_support_message(target_user_id, "admin", message)
+    set_support_status(target_user_id, "admin")
+
+    ok = await send_message_safely(
+        context.bot,
+        target_user_id,
+        "💬 Ответ поддержки:\n\n" + message,
+        reply_markup=support_keyboard(),
+    )
+
+    await update.message.reply_text(
+        "✅ Ответ отправлен пользователю." if ok else "⚠️ Не получилось отправить ответ пользователю."
+    )
+
+
 async def show_state_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, state):
     if state == NAME_INPUT:
         await update.message.reply_text(
@@ -2563,6 +2973,9 @@ async def global_button(update: Update, context: ContextTypes.DEFAULT_TYPE, sour
     if is_home(text):
         return await show_main_menu(update, context)
 
+    if is_support(text):
+        return await begin_support_chat(update, context)
+
     if text == "👤 Личный кабинет":
         save_profile_return_state(context, source_state)
         return await show_profile(update, user_id, contextual=source_state not in (None, START))
@@ -2595,6 +3008,9 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_home(text) or is_back(text):
         return await show_main_menu(update, context)
+
+    if is_support(text):
+        return await begin_support_chat(update, context)
 
     if text == "👤 Личный кабинет":
         return await show_profile(update, user_id)
@@ -2637,6 +3053,9 @@ async def profile_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("_profile_return_state", None)
         context.user_data.pop("_profile_subview", None)
         return await start(update, context)
+
+    if is_support(text):
+        return await begin_support_chat(update, context)
 
     if is_flow_return(text) or is_back(text):
         return await return_to_saved_flow_step(update, context)
@@ -4411,6 +4830,8 @@ def main():
         "Главное меню",
         "🌰 Купить орешки",
         "👤 Личный кабинет",
+        "💬 Поддержка",
+        "Поддержка",
         "🌙 Создать новую колыбельную",
         "Создать новую колыбельную",
         "🌙 Создать колыбельную",
@@ -4430,10 +4851,12 @@ def main():
     conversation = ConversationHandler(
         entry_points=[
             CommandHandler("start", start),
+            CommandHandler("support", support_command),
             MessageHandler(filters.Regex("^🔄 Начать заново$"), start),
             MessageHandler(filters.Regex("^🔄 Начать сначала$"), start),
             MessageHandler(filters.Regex("^Начать заново$"), start),
             MessageHandler(filters.Regex("^Начать сначала$"), start),
+            MessageHandler(filters.Regex("^💬 Поддержка$"), support_button),
         ],
         states={
             START: [MessageHandler(filters.TEXT & ~filters.COMMAND, start_button)],
@@ -4454,6 +4877,7 @@ def main():
             GENERATE_MUSIC: [global_button_handler(GENERATE_MUSIC), MessageHandler(filters.TEXT & ~filters.COMMAND, generate_music_button)],
             PAYMENT_EMAIL_INPUT: [global_button_handler(PAYMENT_EMAIL_INPUT), MessageHandler(filters.TEXT & ~filters.COMMAND, payment_email_input)],
             PROFILE_VIEW: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_view)],
+            SUPPORT_CHAT: [MessageHandler(filters.TEXT & ~filters.COMMAND, support_chat)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -4486,6 +4910,7 @@ def main():
     app.add_handler(CommandHandler("startreminders", startreminders_command), group=-1)
     app.add_handler(CommandHandler("addnuts", addnuts_command), group=-1)
     app.add_handler(CommandHandler("removenuts", removenuts_command), group=-1)
+    app.add_handler(CommandHandler("reply", support_reply_command), group=-1)
     app.add_error_handler(error_handler)
 
     if yookassa_is_configured():

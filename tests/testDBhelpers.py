@@ -100,6 +100,22 @@ class DatabaseHelpersTest(unittest.TestCase):
         finally:
             bot.AUTO_DB_BACKUP_INTERVAL_HOURS = original_interval
 
+    def test_support_keywords_escalate_to_admin(self):
+        self.assertTrue(bot.support_needs_admin_by_keywords("Я оплатил, но орешки не пришли"))
+        self.assertTrue(bot.support_needs_admin_by_keywords("Можно позвать оператора?"))
+        self.assertFalse(bot.support_needs_admin_by_keywords("Как создать новую колыбельную?"))
+
+    def test_support_messages_are_saved(self):
+        user_id = 1013
+
+        bot.log_support_message(user_id, "user", "Здравствуйте")
+        bot.log_support_message(user_id, "ai", "Здравствуйте, чем помочь?")
+
+        messages = bot.get_recent_support_messages(user_id)
+
+        self.assertEqual(messages[-2]["sender"], "user")
+        self.assertEqual(messages[-1]["sender"], "ai")
+
     def test_paid_order_is_credited_once(self):
         user = SimpleNamespace(id=1002, username="buyer")
         bot.create_user_if_not_exists(user)
