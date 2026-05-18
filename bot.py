@@ -39,6 +39,7 @@ YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
 YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL", "https://t.me/")
 YOOKASSA_VAT_CODE = int(os.getenv("YOOKASSA_VAT_CODE", "1"))
 YOOKASSA_TAX_SYSTEM_CODE = os.getenv("YOOKASSA_TAX_SYSTEM_CODE")
+YOOKASSA_PAYMENT_MODE = os.getenv("YOOKASSA_PAYMENT_MODE", "full_prepayment")
 YOOKASSA_WEBHOOK_HOST = os.getenv("YOOKASSA_WEBHOOK_HOST", "0.0.0.0")
 YOOKASSA_WEBHOOK_PORT = int(os.getenv("YOOKASSA_WEBHOOK_PORT", "8080"))
 YOOKASSA_WEBHOOK_PATH = os.getenv("YOOKASSA_WEBHOOK_PATH", "/yookassa-webhook")
@@ -2227,6 +2228,37 @@ def yookassa_test_notice():
     return "🧪 Тестовая оплата ЮKassa. Реальные деньги не списываются.\n\n"
 
 
+def get_yookassa_secret_kind():
+    if not YOOKASSA_SECRET_KEY:
+        return "не задан"
+
+    if YOOKASSA_SECRET_KEY.startswith("test_"):
+        return "похоже тестовый"
+
+    return "похоже боевой"
+
+
+def get_yookassa_config_warnings():
+    warnings = []
+
+    if not YOOKASSA_SHOP_ID:
+        warnings.append("YOOKASSA_SHOP_ID не задан")
+
+    if not YOOKASSA_SECRET_KEY:
+        warnings.append("YOOKASSA_SECRET_KEY не задан")
+
+    if YOOKASSA_TEST_MODE:
+        warnings.append("YOOKASSA_TEST_MODE включён: реальные деньги не списываются")
+
+    if not YOOKASSA_TEST_MODE and YOOKASSA_SECRET_KEY and YOOKASSA_SECRET_KEY.startswith("test_"):
+        warnings.append("Тестовый secret key используется при выключенном тестовом режиме")
+
+    if not YOOKASSA_RETURN_URL or YOOKASSA_RETURN_URL == "https://t.me/":
+        warnings.append("YOOKASSA_RETURN_URL лучше указать ссылкой на бота")
+
+    return warnings
+
+
 def create_yookassa_payment(user_id, package_key, customer_email):
     package = NUT_PACKAGES[package_key]
     local_payment_id = create_local_payment_order(user_id, package_key, customer_email)
@@ -2262,7 +2294,7 @@ def create_yookassa_payment(user_id, package_key, customer_email):
                     },
                     "vat_code": YOOKASSA_VAT_CODE,
                     "payment_subject": "service",
-                    "payment_mode": "full_payment",
+                    "payment_mode": YOOKASSA_PAYMENT_MODE,
                 }
             ],
         },
@@ -4665,6 +4697,35 @@ async def dbstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def paystatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    warnings = get_yookassa_config_warnings()
+    mode = "тестовый" if YOOKASSA_TEST_MODE else "боевой"
+    webhook_example = f"https://твой-домен{YOOKASSA_WEBHOOK_PATH}"
+
+    await update.message.reply_text(
+        "💳 Настройки ЮKassa\n\n"
+        f"Режим: {mode}\n"
+        f"YOOKASSA_SHOP_ID: {'задан' if YOOKASSA_SHOP_ID else 'не задан'}\n"
+        f"YOOKASSA_SECRET_KEY: {get_yookassa_secret_kind()}\n"
+        f"Return URL: {YOOKASSA_RETURN_URL}\n"
+        f"Webhook path: {YOOKASSA_WEBHOOK_PATH}\n"
+        f"Webhook port: {YOOKASSA_WEBHOOK_PORT}\n"
+        f"Webhook в ЮKassa должен быть: {webhook_example}\n\n"
+        f"VAT code: {YOOKASSA_VAT_CODE}\n"
+        f"Tax system code: {YOOKASSA_TAX_SYSTEM_CODE or 'не задан'}\n"
+        f"Payment mode: {YOOKASSA_PAYMENT_MODE}\n\n"
+        + (
+            "⚠️ Что проверить:\n- " + "\n- ".join(warnings)
+            if warnings else
+            "✅ Критичных предупреждений по настройкам нет."
+        )
+    )
+
+
 async def storagecheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("🌙 Эта команда доступна только администратору.")
@@ -5111,6 +5172,7 @@ def main():
     app.add_handler(CommandHandler("remindpreview", remindpreview_command), group=-1)
     app.add_handler(CommandHandler("users", users_command), group=-1)
     app.add_handler(CommandHandler("dbstatus", dbstatus_command), group=-1)
+    app.add_handler(CommandHandler("paystatus", paystatus_command), group=-1)
     app.add_handler(CommandHandler("storagecheck", storagecheck_command), group=-1)
     app.add_handler(CommandHandler("backupdb", backupdb_command), group=-1)
     app.add_handler(CommandHandler("restoredb", restoredb_command), group=-1)

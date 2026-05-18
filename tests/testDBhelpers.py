@@ -105,6 +105,18 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertTrue(bot.support_needs_admin_by_keywords("Можно позвать оператора?"))
         self.assertFalse(bot.support_needs_admin_by_keywords("Как создать новую колыбельную?"))
 
+    def test_yookassa_secret_kind_hides_secret_value(self):
+        original_secret = bot.YOOKASSA_SECRET_KEY
+
+        try:
+            bot.YOOKASSA_SECRET_KEY = "test_secret_value"
+            self.assertEqual(bot.get_yookassa_secret_kind(), "похоже тестовый")
+
+            bot.YOOKASSA_SECRET_KEY = "live_secret_value"
+            self.assertEqual(bot.get_yookassa_secret_kind(), "похоже боевой")
+        finally:
+            bot.YOOKASSA_SECRET_KEY = original_secret
+
     def test_support_messages_are_saved(self):
         user_id = 1013
 
