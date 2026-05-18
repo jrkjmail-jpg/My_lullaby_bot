@@ -117,6 +117,15 @@ class DatabaseHelpersTest(unittest.TestCase):
         finally:
             bot.YOOKASSA_SECRET_KEY = original_secret
 
+    def test_parse_age_allows_up_to_119_years(self):
+        self.assertEqual(bot.parse_age("119")["display"], "119 лет")
+        self.assertEqual(bot.parse_age("21")["display"], "21 год")
+        self.assertEqual(bot.parse_age("22")["display"], "22 года")
+        self.assertEqual(bot.parse_age("5,1")["display"], "5 лет 1 месяц")
+
+        self.assertIsNone(bot.parse_age("119,1"))
+        self.assertIsNone(bot.parse_age("120"))
+
     def test_support_messages_are_saved(self):
         user_id = 1013
 

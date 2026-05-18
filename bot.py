@@ -1533,26 +1533,26 @@ def validate_name(name):
 def parse_age(age_text):
     age_text = age_text.strip().replace(".", ",")
 
-    if not re.fullmatch(r"\d{1,2}(,\d{1,2})?", age_text):
+    if not re.fullmatch(r"\d{1,3}(,\d{1,2})?", age_text):
         return None
 
     parts = age_text.split(",")
     years = int(parts[0])
     months = int(parts[1]) if len(parts) == 2 else 0
 
-    if years < 0 or years > 12:
+    if years < 0 or years > 119:
         return None
 
     if months < 0 or months > 11:
         return None
 
-    if years == 12 and months > 0:
+    if years == 119 and months > 0:
         return None
 
     if months == 0:
-        display = f"{years} лет"
+        display = f"{years} {format_year_word(years)}"
     else:
-        display = f"{years} лет {months} месяцев"
+        display = f"{years} {format_year_word(years)} {months} {format_month_word(months)}"
 
     return {
         "raw": age_text,
@@ -1560,6 +1560,32 @@ def parse_age(age_text):
         "months": months,
         "display": display,
     }
+
+
+def format_year_word(years):
+    if 10 <= years % 100 <= 20:
+        return "лет"
+
+    if years % 10 == 1:
+        return "год"
+
+    if 2 <= years % 10 <= 4:
+        return "года"
+
+    return "лет"
+
+
+def format_month_word(months):
+    if 10 <= months % 100 <= 20:
+        return "месяцев"
+
+    if months % 10 == 1:
+        return "месяц"
+
+    if 2 <= months % 10 <= 4:
+        return "месяца"
+
+    return "месяцев"
 
 
 def validate_age(age):
