@@ -87,6 +87,19 @@ class DatabaseHelpersTest(unittest.TestCase):
         finally:
             shutil.rmtree(backup_dir, ignore_errors=True)
 
+    def test_auto_backup_interval_limits_repeated_backups(self):
+        original_interval = bot.AUTO_DB_BACKUP_INTERVAL_HOURS
+        bot.AUTO_DB_BACKUP_INTERVAL_HOURS = 6
+
+        try:
+            self.assertTrue(bot.should_send_auto_db_backup())
+
+            bot.mark_auto_backup_sent()
+
+            self.assertFalse(bot.should_send_auto_db_backup())
+        finally:
+            bot.AUTO_DB_BACKUP_INTERVAL_HOURS = original_interval
+
     def test_paid_order_is_credited_once(self):
         user = SimpleNamespace(id=1002, username="buyer")
         bot.create_user_if_not_exists(user)

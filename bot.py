@@ -83,6 +83,7 @@ REMINDERS_ENABLED = os.getenv("REMINDERS_ENABLED", "1").lower() in ("1", "true",
 REMINDER_AFTER_DAYS = int(os.getenv("REMINDER_AFTER_DAYS", "14"))
 REMINDER_INTERVAL_HOURS = int(os.getenv("REMINDER_INTERVAL_HOURS", "24"))
 AUTO_DB_BACKUP_ENABLED = os.getenv("AUTO_DB_BACKUP_ENABLED", "1").lower() in ("1", "true", "yes", "да")
+AUTO_DB_BACKUP_INTERVAL_HOURS = int(os.getenv("AUTO_DB_BACKUP_INTERVAL_HOURS", "6"))
 MAX_RESTORE_DB_BYTES = int(os.getenv("MAX_RESTORE_DB_BYTES", str(50 * 1024 * 1024)))
 
 
@@ -797,6 +798,50 @@ def replace_database_with_backup_file(file_path):
     init_db()
 
     return previous_backup_path
+
+
+def get_backup_meta_path():
+    db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+    return os.path.join(db_dir, "kolybelka_backup_meta.json")
+
+
+def get_last_auto_backup_at():
+    meta_path = get_backup_meta_path()
+
+    if not os.path.exists(meta_path):
+        return 0
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as meta_file:
+            data = json.load(meta_file)
+    except (OSError, json.JSONDecodeError):
+        return 0
+
+    return float(data.get("last_auto_backup_at", 0) or 0)
+
+
+def mark_auto_backup_sent():
+    meta_path = get_backup_meta_path()
+    os.makedirs(os.path.dirname(os.path.abspath(meta_path)), exist_ok=True)
+
+    with open(meta_path, "w", encoding="utf-8") as meta_file:
+        json.dump(
+            {
+                "last_auto_backup_at": time.time(),
+                "interval_hours": AUTO_DB_BACKUP_INTERVAL_HOURS,
+            },
+            meta_file,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+def should_send_auto_db_backup():
+    if AUTO_DB_BACKUP_INTERVAL_HOURS <= 0:
+        return True
+
+    seconds_since_backup = time.time() - get_last_auto_backup_at()
+    return seconds_since_backup >= AUTO_DB_BACKUP_INTERVAL_HOURS * 3600
 
 
 def get_users_for_reminder():
@@ -3774,7 +3819,19 @@ async def send_database_backup_to_admins(bot, reason):
     if not AUTO_DB_BACKUP_ENABLED or not ADMIN_IDS:
         return False
 
-    return await send_database_backup(bot, sorted(ADMIN_IDS), reason)
+    if not should_send_auto_db_backup():
+        print(
+            "Автобэкап базы пропущен: "
+            f"интервал {AUTO_DB_BACKUP_INTERVAL_HOURS} ч ещё не прошёл"
+        )
+        return False
+
+    sent = await send_database_backup(bot, sorted(ADMIN_IDS), reason)
+
+    if sent:
+        mark_auto_backup_sent()
+
+    return sent
 
 
 async def send_bulk_message(bot, user_ids, text, reply_markup=None, mark_reminders=False):
