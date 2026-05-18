@@ -87,6 +87,12 @@ AUTO_DB_BACKUP_INTERVAL_HOURS = int(os.getenv("AUTO_DB_BACKUP_INTERVAL_HOURS", "
 MAX_RESTORE_DB_BYTES = int(os.getenv("MAX_RESTORE_DB_BYTES", str(50 * 1024 * 1024)))
 SUPPORT_AI_ENABLED = os.getenv("SUPPORT_AI_ENABLED", "1").lower() in ("1", "true", "yes", "да")
 SUPPORT_AI_MODEL = os.getenv("SUPPORT_AI_MODEL", "gpt-5.5")
+SUPPORT_ADMIN_CHAT_ID_RAW = os.getenv("SUPPORT_ADMIN_CHAT_ID", "").strip()
+SUPPORT_ADMIN_CHAT_ID = (
+    int(SUPPORT_ADMIN_CHAT_ID_RAW)
+    if SUPPORT_ADMIN_CHAT_ID_RAW.lstrip("-").isdigit()
+    else None
+)
 
 
 def is_path_inside(path, parent):
@@ -589,6 +595,16 @@ def init_db():
             )
         """)
 
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS support_admin_messages (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, message_id)
+            )
+        """)
+
         ensure_column(cur, "users", "lullabies", "INTEGER DEFAULT 0")
         ensure_column(cur, "users", "last_seen_at", "TEXT")
         ensure_column(cur, "users", "last_lullaby_at", "TEXT")
@@ -948,6 +964,25 @@ def get_recent_support_messages(user_id, limit=8):
         {"sender": row[0], "message": row[1]}
         for row in reversed(rows)
     ]
+
+
+def remember_support_admin_message(chat_id, message_id, user_id):
+    with db_connection() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO support_admin_messages (chat_id, message_id, user_id)
+            VALUES (?, ?, ?)
+        """, (chat_id, message_id, user_id))
+
+
+def get_support_user_by_admin_message(chat_id, message_id):
+    with db_connection() as conn:
+        row = conn.execute("""
+            SELECT user_id
+            FROM support_admin_messages
+            WHERE chat_id = ? AND message_id = ?
+        """, (chat_id, message_id)).fetchone()
+
+    return row[0] if row else None
 
 
 def get_users_for_reminder():
@@ -2645,11 +2680,7 @@ async def begin_support_chat(update: Update, context: ContextTypes.DEFAULT_TYPE,
     return SUPPORT_CHAT
 
 
-async def notify_support_admins(context: ContextTypes.DEFAULT_TYPE, user, message, reason, ai_answer=None):
-    if not ADMIN_IDS:
-        print("Поддержка: нет ADMIN_IDS, некому передать обращение")
-        return False
-
+def format_support_admin_text(user, message, reason, ai_answer=None):
     username = f"@{user.username}" if user.username else "без username"
     text = (
         "💬 Обращение в поддержку\n\n"
@@ -2662,7 +2693,37 @@ async def notify_support_admins(context: ContextTypes.DEFAULT_TYPE, user, messag
     if ai_answer:
         text += f"Ответ ИИ пользователю:\n{ai_answer}\n\n"
 
-    text += f"Ответить пользователю:\n/reply {user.id} текст ответа"
+    text += (
+        "Как ответить:\n"
+        "1. В этой группе нажми «Ответить» на это сообщение и напиши текст.\n"
+        f"2. Или командой: /reply {user.id} текст ответа"
+    )
+
+    return text
+
+
+async def notify_support_admins(context: ContextTypes.DEFAULT_TYPE, user, message, reason, ai_answer=None):
+    text = format_support_admin_text(user, message, reason, ai_answer=ai_answer)
+
+    if SUPPORT_ADMIN_CHAT_ID:
+        try:
+            sent_message = await context.bot.send_message(
+                chat_id=SUPPORT_ADMIN_CHAT_ID,
+                text=text,
+            )
+            remember_support_admin_message(
+                sent_message.chat_id,
+                sent_message.message_id,
+                user.id,
+            )
+            return True
+        except Exception as error:
+            print("Поддержка: не удалось отправить обращение в группу:", error)
+            return False
+
+    if not ADMIN_IDS:
+        print("Поддержка: нет ADMIN_IDS и SUPPORT_ADMIN_CHAT_ID, некому передать обращение")
+        return False
 
     sent_any = False
 
@@ -2810,6 +2871,61 @@ async def support_reply_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     await update.message.reply_text(
         "✅ Ответ отправлен пользователю." if ok else "⚠️ Не получилось отправить ответ пользователю."
+    )
+
+
+async def support_group_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not SUPPORT_ADMIN_CHAT_ID:
+        return
+
+    if update.effective_chat.id != SUPPORT_ADMIN_CHAT_ID:
+        return
+
+    if not update.message or not update.message.reply_to_message:
+        return
+
+    if update.effective_user and not is_admin(update.effective_user.id):
+        return
+
+    target_user_id = get_support_user_by_admin_message(
+        update.effective_chat.id,
+        update.message.reply_to_message.message_id,
+    )
+
+    if not target_user_id:
+        return
+
+    message = (update.message.text or "").strip()
+
+    if not message:
+        await update.message.reply_text("💬 Напиши текст ответа обычным сообщением.")
+        return
+
+    log_support_message(target_user_id, "admin", message)
+    set_support_status(target_user_id, "admin")
+
+    ok = await send_message_safely(
+        context.bot,
+        target_user_id,
+        "💬 Ответ поддержки:\n\n" + message,
+        reply_markup=support_keyboard(),
+    )
+
+    await update.message.reply_text(
+        "✅ Отправила пользователю." if ok else "⚠️ Не получилось отправить пользователю."
+    )
+
+
+async def supportchatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user and not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    await update.message.reply_text(
+        "💬 ID этого чата для поддержки:\n"
+        f"{update.effective_chat.id}\n\n"
+        "Чтобы обращения приходили сюда, добавь в окружение BotHost:\n"
+        f"SUPPORT_ADMIN_CHAT_ID={update.effective_chat.id}"
     )
 
 
@@ -4911,6 +5027,8 @@ def main():
     app.add_handler(CommandHandler("addnuts", addnuts_command), group=-1)
     app.add_handler(CommandHandler("removenuts", removenuts_command), group=-1)
     app.add_handler(CommandHandler("reply", support_reply_command), group=-1)
+    app.add_handler(CommandHandler("supportchatid", supportchatid_command), group=-1)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, support_group_reply_handler), group=-1)
     app.add_error_handler(error_handler)
 
     if yookassa_is_configured():
