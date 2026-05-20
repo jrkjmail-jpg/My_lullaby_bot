@@ -1452,7 +1452,7 @@ def make_stressed_name(name_text):
     return plain_name, stressed_name, ""
 
 
-def make_genitive_name(name):
+def make_genitive_name(name, gender=""):
     name = name.strip()
 
     if not name:
@@ -1480,6 +1480,16 @@ def make_genitive_name(name):
         "дарья": "Дарьи",
         "ксения": "Ксении",
         "удмуртия": "Удмуртии",
+        "марсель": "Марселя",
+        "игорь": "Игоря",
+        "михаил": "Михаила",
+        "даниил": "Даниила",
+        "матвей": "Матвея",
+        "сергей": "Сергея",
+        "андрей": "Андрея",
+        "алексей": "Алексея",
+        "николай": "Николая",
+        "тимофей": "Тимофея",
     }
 
     if lower in special_names:
@@ -1497,6 +1507,8 @@ def make_genitive_name(name):
         return name[:-1] + "ы"
 
     if lower.endswith("ь"):
+        if gender == "👦 Мальчик":
+            return name[:-1] + "я"
         return name[:-1] + "и"
 
     if lower.endswith("й"):
@@ -4256,8 +4268,8 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         started_at = time.monotonic()
-        genitive_name = make_genitive_name(data["name"])
-        title = f"Колыбельная для {genitive_name}"
+        genitive_name = make_genitive_name(data["name"], data.get("gender", ""))
+        title = f"Колыбельная {genitive_name}"
         style = make_music_style(data)
 
         task_id = await asyncio.wait_for(

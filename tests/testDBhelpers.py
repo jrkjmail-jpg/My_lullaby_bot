@@ -330,6 +330,12 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertEqual(plain_name, "Эмма")
         self.assertEqual(stressed_name, "Э́мма")
 
+    def test_make_genitive_name_uses_gender_for_soft_sign_names(self):
+        self.assertEqual(bot.make_genitive_name("Марсель", "👦 Мальчик"), "Марселя")
+        self.assertEqual(bot.make_genitive_name("Игорь", "👦 Мальчик"), "Игоря")
+        self.assertEqual(bot.make_genitive_name("Алиса", "👧 Девочка"), "Алисы")
+        self.assertEqual(bot.make_genitive_name("София", "👧 Девочка"), "Софии")
+
 
 if __name__ == "__main__":
     unittest.main()
