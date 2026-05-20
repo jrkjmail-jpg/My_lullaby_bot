@@ -2510,9 +2510,30 @@ def schedule_payment_notification(app, result):
 
 def make_yookassa_webhook_handler(app):
     class YookassaWebhookHandler(BaseHTTPRequestHandler):
+        def send_plain_response(self, status, body=""):
+            encoded_body = body.encode("utf-8")
+
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded_body)))
+            self.end_headers()
+
+            if self.command != "HEAD" and encoded_body:
+                self.wfile.write(encoded_body)
+
+        def do_GET(self):
+            if urlparse(self.path).path == YOOKASSA_WEBHOOK_PATH:
+                self.send_plain_response(HTTPStatus.OK, "YooKassa webhook is running")
+                return
+
+            self.send_plain_response(HTTPStatus.NOT_FOUND, "Not found")
+
+        def do_HEAD(self):
+            self.do_GET()
+
         def do_POST(self):
             if urlparse(self.path).path != YOOKASSA_WEBHOOK_PATH:
-                self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+                self.send_plain_response(HTTPStatus.NOT_FOUND, "Not found")
                 return
 
             try:
@@ -2545,6 +2566,9 @@ def make_yookassa_webhook_handler(app):
             schedule_payment_notification(app, result)
 
         def log_message(self, format, *args):
+            if self.command in {"GET", "HEAD"}:
+                return
+
             print("ЮKassa webhook:", format % args)
 
     return YookassaWebhookHandler
