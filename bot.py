@@ -4910,6 +4910,44 @@ def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
+def build_commands_text():
+    return (
+        "📋 Команды Колыбелки\n\n"
+        "Обычные команды:\n"
+        "/start — открыть главное меню и начать работу с ботом заново.\n"
+        "/balance — показать баланс орешков и открыть личный кабинет.\n"
+        "/support — открыть чат поддержки. Можно написать вопрос сразу после команды.\n"
+        "/myid — показать Telegram ID пользователя.\n"
+        "/stopreminders — отключить мягкие напоминания.\n"
+        "/startreminders — снова включить мягкие напоминания.\n"
+        "/cancel — отменить текущий сценарий и вернуться к главному меню.\n\n"
+        "Админские команды:\n"
+        "/commands — показать этот список команд.\n"
+        "/addnuts user_id количество — вручную начислить орешки пользователю.\n"
+        "/removenuts user_id количество — вручную списать орешки у пользователя.\n"
+        "/broadcast текст — отправить произвольную рассылку всем пользователям.\n"
+        "/maintenance текст — отправить уведомление о техническом перерыве.\n"
+        "/remindnow — вручную отправить мягкое напоминание подходящим пользователям.\n"
+        "/remindpreview — посмотреть варианты мягких напоминаний без рассылки.\n"
+        "/users — показать пользователей в базе и короткую статистику.\n"
+        "/dbstatus — проверить SQLite-базу, путь файла, платежи и орешки.\n"
+        "/paystatus — проверить настройки ЮKassa без вывода секретного ключа.\n"
+        "/storagecheck — проверить, что база лежит в постоянном хранилище.\n"
+        "/backupdb — получить резервную копию базы в Telegram.\n"
+        "/restoredb — восстановить базу из файла .db.\n"
+        "/reply user_id текст — ответить пользователю от имени поддержки.\n"
+        "/supportchatid — показать ID текущего чата для группы поддержки."
+    )
+
+
+async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    await update.message.reply_text(build_commands_text())
+
+
 async def addnuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("🌙 Эта команда доступна только администратору.")
@@ -5205,10 +5243,13 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, restoredb_document_handler), group=-1)
     app.add_handler(CommandHandler("stopreminders", stopreminders_command), group=-1)
     app.add_handler(CommandHandler("startreminders", startreminders_command), group=-1)
+    app.add_handler(CommandHandler("commands", commands_command), group=-1)
+    app.add_handler(CommandHandler("Commands", commands_command), group=-1)
     app.add_handler(CommandHandler("addnuts", addnuts_command), group=-1)
     app.add_handler(CommandHandler("removenuts", removenuts_command), group=-1)
     app.add_handler(CommandHandler("reply", support_reply_command), group=-1)
     app.add_handler(CommandHandler("supportchatid", supportchatid_command), group=-1)
+    app.add_handler(MessageHandler(filters.Regex("^/?Commands$"), commands_command), group=-1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, support_group_reply_handler), group=-1)
     app.add_error_handler(error_handler)
 

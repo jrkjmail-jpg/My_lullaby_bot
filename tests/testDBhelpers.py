@@ -126,6 +126,14 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertIsNone(bot.parse_age("119,1"))
         self.assertIsNone(bot.parse_age("120"))
 
+    def test_commands_text_includes_admin_commands(self):
+        commands_text = bot.build_commands_text()
+
+        self.assertIn("/commands", commands_text)
+        self.assertIn("/addnuts user_id количество", commands_text)
+        self.assertIn("/paystatus", commands_text)
+        self.assertIn("/supportchatid", commands_text)
+
     def test_support_messages_are_saved(self):
         user_id = 1013
 
