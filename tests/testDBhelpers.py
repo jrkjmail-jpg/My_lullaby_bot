@@ -134,6 +134,17 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertIn("/paystatus", commands_text)
         self.assertIn("/supportchatid", commands_text)
 
+    def test_nuts_offer_text_includes_prices_and_value(self):
+        offer_text = bot.build_nuts_offer_text()
+
+        self.assertIn("1 орешек", offer_text)
+        self.assertIn("349 ₽", offer_text)
+        self.assertIn("2 орешка", offer_text)
+        self.assertIn("499 ₽", offer_text)
+        self.assertIn("3 орешка", offer_text)
+        self.assertIn("599 ₽", offer_text)
+        self.assertIn("одна готовая музыкальная колыбельная", offer_text)
+
     def test_support_messages_are_saved(self):
         user_id = 1013
 

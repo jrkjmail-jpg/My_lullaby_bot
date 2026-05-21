@@ -2718,12 +2718,30 @@ async def show_profile(update: Update, user_id, contextual=False):
     return PROFILE_VIEW if contextual else START
 
 
+def build_nuts_offer_text():
+    one_nut = NUT_PACKAGES["🌰 Купить 1 орешек"]
+    two_nuts = NUT_PACKAGES["🌰 Купить 2 орешка"]
+    three_nuts = NUT_PACKAGES["🌰 Купить 3 орешка"]
+
+    return (
+        "🌰 Орешки для персональных колыбельных\n\n"
+        "Каждый орешек — это одна готовая музыкальная колыбельная: "
+        "с именем ребёнка, любимыми героями, нежным голосом и спокойной музыкой.\n\n"
+        "Выбери запас тёплых песен:\n\n"
+        f"🌙 1 орешек — 🔵 {format_price(one_nut['price'])} ₽\n"
+        "Для первой колыбельной, чтобы попробовать и услышать, как это звучит именно про вашего ребёнка.\n\n"
+        f"💛 2 орешка — 🔵 {format_price(two_nuts['price'])} ₽\n"
+        "Для двух разных историй: например про любимую игрушку и спокойное завершение дня.\n\n"
+        f"✨ 3 орешка — 🔵 {format_price(three_nuts['price'])} ₽\n"
+        "Самый выгодный вариант: можно сделать песни под разные моменты — день рождения, поездку, "
+        "новую игрушку или просто особенно тёплый вечер.\n\n"
+        "После оплаты орешки начислятся автоматически, и можно сразу создавать колыбельную."
+    )
+
+
 async def show_buy_nuts_menu(update: Update, contextual=False):
     await update.message.reply_text(
-        "🌰 Выбери количество орешков\n\n"
-        "1 орешек — 🔵 349 ₽\n"
-        "2 орешка — 🔵 499 ₽\n"
-        "3 орешка — 🔵 599 ₽",
+        build_nuts_offer_text(),
         reply_markup=flow_buy_keyboard() if contextual else buy_keyboard()
     )
 
