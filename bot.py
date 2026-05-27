@@ -9,6 +9,7 @@ import requests
 import threading
 import shutil
 import time
+import mimetypes
 from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -55,6 +56,7 @@ TELEGRAM_EVENT_LOOP = None
 REMINDER_TASK = None
 BACKUP_TASK = None
 SUNO_BASE_URL = "https://api.sunoapi.org"
+SUNO_FILE_UPLOAD_BASE_URL = os.getenv("SUNO_FILE_UPLOAD_BASE_URL", "https://sunoapiorg.redpandaai.co")
 YOOKASSA_BASE_URL = "https://api.yookassa.ru/v3"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -325,6 +327,11 @@ def ensure_persistence_dir():
 
 MAX_EDITS = 5
 NUTS_PER_GENERATION = 1
+CUSTOM_VOICE_GENERATION_NUTS = 3
+CUSTOM_VOICE_OPTION = "🎙 Мой голос"
+CUSTOM_VOICE_MAX_FILE_BYTES = int(os.getenv("CUSTOM_VOICE_MAX_FILE_BYTES", str(20 * 1024 * 1024)))
+CUSTOM_VOICE_VALIDATE_TIMEOUT_SECONDS = int(os.getenv("CUSTOM_VOICE_VALIDATE_TIMEOUT_SECONDS", "240"))
+CUSTOM_VOICE_GENERATE_TIMEOUT_SECONDS = int(os.getenv("CUSTOM_VOICE_GENERATE_TIMEOUT_SECONDS", "420"))
 
 NUT_PACKAGES = {
     "🌰 Купить 1 орешек": {
@@ -367,7 +374,10 @@ NUT_PACKAGES = {
     PAYMENT_EMAIL_INPUT,
     PROFILE_VIEW,
     SUPPORT_CHAT,
-) = range(19)
+    CUSTOM_VOICE_CONSENT,
+    CUSTOM_VOICE_SOURCE,
+    CUSTOM_VOICE_VERIFY,
+) = range(22)
 
 
 BAD_WORDS = [
@@ -426,6 +436,7 @@ def main_menu_keyboard():
 def profile_keyboard():
     return keyboard([
         ["🌰 Купить орешки"],
+        [CUSTOM_VOICE_OPTION],
         ["🌙 Создать новую колыбельную"],
         ["💬 Поддержка"],
     ], with_nav=False)
@@ -435,6 +446,7 @@ def flow_profile_keyboard():
     return ReplyKeyboardMarkup(
         [
             ["🌰 Купить орешки"],
+            [CUSTOM_VOICE_OPTION],
             ["💬 Поддержка"],
             ["⬅️ Вернуться назад"],
         ],
@@ -510,6 +522,36 @@ def create_music_keyboard():
     ])
 
 
+def voice_selection_keyboard():
+    return keyboard([
+        ["👩 Женский голос"],
+        ["👨 Мужской голос"],
+        ["🧒 Детский голос"],
+        [CUSTOM_VOICE_OPTION],
+    ])
+
+
+def custom_voice_profile_keyboard(has_voice, contextual=True):
+    rows = []
+
+    if has_voice:
+        rows.append(["🔄 Перезаписать голос"])
+    else:
+        rows.append(["🎙 Создать мой голос"])
+
+    rows.append(["🌙 Создать новую колыбельную"])
+    rows.append(["⬅️ Вернуться назад" if contextual else "🏠 Главное меню"])
+
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, one_time_keyboard=False)
+
+
+def custom_voice_consent_keyboard():
+    return keyboard([
+        ["✅ Подтверждаю и записываю голос"],
+        ["⬅️ Вернуться назад"],
+    ], with_nav=False)
+
+
 # =========================
 # БАЗА ДАННЫХ
 # =========================
@@ -544,7 +586,12 @@ def init_db():
                 last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 last_lullaby_at TEXT,
                 reminders_enabled INTEGER NOT NULL DEFAULT 1,
-                last_reminder_at TEXT
+                last_reminder_at TEXT,
+                custom_voice_id TEXT,
+                custom_voice_name TEXT,
+                custom_voice_task_id TEXT,
+                custom_voice_status TEXT,
+                custom_voice_updated_at TEXT
             )
         """)
 
@@ -612,6 +659,11 @@ def init_db():
         ensure_column(cur, "users", "last_lullaby_at", "TEXT")
         ensure_column(cur, "users", "reminders_enabled", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(cur, "users", "last_reminder_at", "TEXT")
+        ensure_column(cur, "users", "custom_voice_id", "TEXT")
+        ensure_column(cur, "users", "custom_voice_name", "TEXT")
+        ensure_column(cur, "users", "custom_voice_task_id", "TEXT")
+        ensure_column(cur, "users", "custom_voice_status", "TEXT")
+        ensure_column(cur, "users", "custom_voice_updated_at", "TEXT")
         ensure_column(cur, "payments", "lullabies", "INTEGER DEFAULT 0")
         ensure_column(cur, "payments", "customer_email", "TEXT")
 
@@ -662,6 +714,55 @@ def mark_lullaby_created(user_id):
                 last_seen_at = CURRENT_TIMESTAMP
             WHERE user_id = ?
         """, (user_id,))
+
+
+def get_custom_voice_profile(user_id):
+    create_user_id_if_not_exists(user_id)
+
+    with db_connection() as conn:
+        row = conn.execute("""
+            SELECT custom_voice_id, custom_voice_name, custom_voice_task_id,
+                   custom_voice_status, custom_voice_updated_at
+            FROM users
+            WHERE user_id = ?
+        """, (user_id,)).fetchone()
+
+    if not row:
+        return {
+            "voice_id": None,
+            "voice_name": None,
+            "task_id": None,
+            "status": None,
+            "updated_at": None,
+        }
+
+    return {
+        "voice_id": row[0],
+        "voice_name": row[1],
+        "task_id": row[2],
+        "status": row[3],
+        "updated_at": row[4],
+    }
+
+
+def user_has_custom_voice(user_id):
+    profile = get_custom_voice_profile(user_id)
+    return bool(profile["voice_id"] and profile["status"] == "ready")
+
+
+def save_custom_voice_profile(user_id, voice_id, task_id=None, voice_name=None, status="ready"):
+    create_user_id_if_not_exists(user_id)
+
+    with db_connection() as conn:
+        conn.execute("""
+            UPDATE users
+            SET custom_voice_id = ?,
+                custom_voice_name = ?,
+                custom_voice_task_id = ?,
+                custom_voice_status = ?,
+                custom_voice_updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = ?
+        """, (voice_id, voice_name, task_id, status, user_id))
 
 
 def set_reminders_enabled(user_id, enabled):
@@ -1626,6 +1727,13 @@ def clean_filename(text):
     return text.strip()[:80]
 
 
+def generation_nuts_cost(data):
+    if data.get("voice") == CUSTOM_VOICE_OPTION:
+        return CUSTOM_VOICE_GENERATION_NUTS
+
+    return NUTS_PER_GENERATION
+
+
 def format_price(price):
     return price[:-3] if price.endswith(".00") else price
 
@@ -1765,9 +1873,10 @@ def ask_support_ai(user_id, user_message):
 
 Что делает бот:
 - создаёт персональные музыкальные колыбельные для детей;
-- 1 орешек = 1 персональная музыкальная колыбельная;
+- обычная колыбельная стоит 1 орешек;
+- колыбельная с сохранённым голосом пользователя стоит 3 орешка;
 - цены: 1 орешек 349 ₽, 2 орешка 499 ₽, 3 орешка 599 ₽;
-- орешек списывается только после отправки готовой музыкальной колыбельной;
+- орешки списываются только после отправки готовой музыкальной колыбельной;
 - если текст или музыка не создались из-за ошибки или таймаута, орешек не списывается;
 - оплата начисляется автоматически через webhook ЮKassa.
 
@@ -2167,6 +2276,11 @@ def make_music_style(data):
             "male vocal only, soft male singer, warm fatherly voice, "
             "gentle low male voice, calm baritone lullaby, no female vocal, no woman voice"
         )
+    elif voice == CUSTOM_VOICE_OPTION:
+        voice_style = (
+            "custom user voice, intimate personal vocal, gentle lullaby singing, "
+            "warm bedtime voice, natural vocal"
+        )
     else:
         voice_style = (
             "real child voice, very young kid singing, innocent child vocal, "
@@ -2180,7 +2294,7 @@ def make_music_style(data):
     )
 
 
-def create_music_task(lyrics, style, title):
+def create_music_task(lyrics, style, title, persona_id=None):
     headers = {
         "Authorization": f"Bearer {SUNO_API_KEY}",
         "Content-Type": "application/json"
@@ -2196,6 +2310,10 @@ def create_music_task(lyrics, style, title):
         "callBackUrl": "https://example.com/callback"
     }
 
+    if persona_id:
+        data["personaId"] = persona_id
+        data["personaModel"] = "voice_persona"
+
     response = requests.post(
         f"{SUNO_BASE_URL}/api/v1/generate",
         headers=headers,
@@ -2205,6 +2323,130 @@ def create_music_task(lyrics, style, title):
 
     response.raise_for_status()
     return response.json()["data"]["taskId"]
+
+
+def suno_headers(content_type="application/json"):
+    headers = {
+        "Authorization": f"Bearer {SUNO_API_KEY}",
+    }
+
+    if content_type:
+        headers["Content-Type"] = content_type
+
+    return headers
+
+
+def upload_file_to_suno(file_path, file_name=None, upload_path="kolybelka/voices"):
+    mime_type = mimetypes.guess_type(file_name or file_path)[0] or "application/octet-stream"
+
+    with open(file_path, "rb") as upload_file:
+        response = requests.post(
+            f"{SUNO_FILE_UPLOAD_BASE_URL}/api/file-stream-upload",
+            headers=suno_headers(content_type=None),
+            files={"file": (file_name or os.path.basename(file_path), upload_file, mime_type)},
+            data={"uploadPath": upload_path},
+            timeout=180,
+        )
+
+    response.raise_for_status()
+    result = response.json()
+
+    if not result.get("success"):
+        raise RuntimeError(result.get("msg") or "Suno file upload failed")
+
+    return result["data"]["downloadUrl"]
+
+
+def create_voice_validation_task(voice_url):
+    response = requests.post(
+        f"{SUNO_BASE_URL}/api/v1/voice/validate",
+        headers=suno_headers(),
+        json={
+            "voiceUrl": voice_url,
+            "vocalStartS": 0,
+            "vocalEndS": 10,
+            "language": "ru",
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()["data"]["taskId"]
+
+
+def get_voice_validation_info(task_id):
+    response = requests.get(
+        f"{SUNO_BASE_URL}/api/v1/voice/validate-info",
+        headers=suno_headers(content_type=None),
+        params={"taskId": task_id},
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()["data"]
+
+
+def create_custom_voice_task(validation_task_id, verify_url, voice_name):
+    response = requests.post(
+        f"{SUNO_BASE_URL}/api/v1/voice/generate",
+        headers=suno_headers(),
+        json={
+            "taskId": validation_task_id,
+            "verifyUrl": verify_url,
+            "voiceName": voice_name,
+            "description": "Personal lullaby voice for Kolybelka Telegram bot",
+            "style": "Russian lullaby, gentle bedtime vocal, soft warm singing",
+            "singerSkillLevel": "beginner",
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()["data"]["taskId"]
+
+
+def get_custom_voice_record_info(task_id):
+    response = requests.get(
+        f"{SUNO_BASE_URL}/api/v1/voice/record-info",
+        headers=suno_headers(content_type=None),
+        params={"taskId": task_id},
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()["data"]
+
+
+def wait_for_voice_validation_phrase(task_id):
+    deadline = time.monotonic() + CUSTOM_VOICE_VALIDATE_TIMEOUT_SECONDS
+
+    while time.monotonic() < deadline:
+        info = get_voice_validation_info(task_id)
+        status = info.get("status")
+
+        if status == "wait_validating" and info.get("validateInfo"):
+            return info["validateInfo"]
+
+        if status in {"processing_validate_fail", "fail"}:
+            raise RuntimeError(info.get("errorMessage") or "Не получилось подготовить фразу проверки")
+
+        time.sleep(5)
+
+    raise TimeoutError("Suno Voice слишком долго готовил проверочную фразу")
+
+
+def wait_for_custom_voice_id(task_id):
+    deadline = time.monotonic() + CUSTOM_VOICE_GENERATE_TIMEOUT_SECONDS
+
+    while time.monotonic() < deadline:
+        info = get_custom_voice_record_info(task_id)
+        status = info.get("status")
+
+        if status == "success" and info.get("voiceId"):
+            return info["voiceId"]
+
+        if status in {"processing_validate_fail", "fail"}:
+            raise RuntimeError(info.get("errorMessage") or "Не получилось создать голос")
+
+        time.sleep(10)
+
+    raise TimeoutError("Suno Voice слишком долго создавал голос")
 
 
 def get_music_audio_urls(task_id):
@@ -2670,7 +2912,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     f"— любимые персонажи\n"
     f"— нежный голос и спокойная музыка\n\n"
     f"✨ Получается настоящая колыбельная, под которую ребёнок засыпает быстрее и спокойнее 🌙\n\n"
-    f"🌰 1 орешек = 1 персональная музыкальная колыбельная\n\n"
+    f"🌰 Обычная колыбельная стоит 1 орешек\n"
+    f"🎙 Колыбельная с твоим сохранённым голосом — 3 орешка\n\n"
     f"💛 Давай создадим первую прямо сейчас:",
     reply_markup=main_menu_keyboard()
     )
@@ -2689,7 +2932,8 @@ async def offer_buy_nuts(update: Update, user_id):
     await update.message.reply_text(
         f"🌙 На балансе пока нет орешков.\n\n"
         f"Сейчас доступно: {nuts}\n"
-        f"Для создания колыбельной нужен 1 орешек.\n\n"
+        f"Обычная колыбельная стоит 1 орешек.\n"
+        f"Колыбельная с твоим сохранённым голосом стоит 3 орешка.\n\n"
         f"Выбери количество орешков, и после оплаты можно будет сразу начать создание.",
         reply_markup=buy_keyboard()
     )
@@ -2702,17 +2946,262 @@ def save_profile_return_state(context: ContextTypes.DEFAULT_TYPE, source_state):
 
 async def show_profile(update: Update, user_id, contextual=False):
     nuts = get_nuts(user_id)
+    voice_profile = get_custom_voice_profile(user_id)
+    voice_line = (
+        "🎙 Свой голос: привязан"
+        if voice_profile["voice_id"] and voice_profile["status"] == "ready"
+        else "🎙 Свой голос: не привязан"
+    )
 
     await update.message.reply_text(
         f"👤 Личный кабинет\n\n"
         f"🌰 Твой баланс: {nuts} орешков\n\n"
-        f"1 орешек = 1 персональная музыкальная колыбельная.\n\n"
+        f"1 орешек = 1 обычная персональная музыкальная колыбельная.\n"
+        f"3 орешка = колыбельная с твоим сохранённым голосом.\n\n"
+        f"{voice_line}\n\n"
         f"Здесь можно купить орешки"
         f"{' и вернуться к созданию колыбельной' if contextual else ' или сразу создать новую колыбельную 🌙'}",
         reply_markup=flow_profile_keyboard() if contextual else profile_keyboard()
     )
 
     return PROFILE_VIEW if contextual else START
+
+
+async def show_custom_voice_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, contextual=True):
+    user_id = update.effective_user.id
+    profile = get_custom_voice_profile(user_id)
+    has_voice = bool(profile["voice_id"] and profile["status"] == "ready")
+
+    if has_voice:
+        text = (
+            "🎙 Мой голос\n\n"
+            "Голос уже привязан и сохранён.\n\n"
+            f"Колыбельная с твоим голосом стоит {CUSTOM_VOICE_GENERATION_NUTS} орешка каждый раз. "
+            "Сам голос записывать заново не нужно, пока ты сам не захочешь его обновить.\n\n"
+            f"Обновлён: {profile['updated_at'] or 'дата не указана'}"
+        )
+    else:
+        text = (
+            "🎙 Мой голос\n\n"
+            "Можно привязать голос мамы, папы или другого близкого человека, "
+            "чтобы будущие колыбельные звучали особенно лично.\n\n"
+            f"Создание каждой колыбельной с сохранённым голосом стоит {CUSTOM_VOICE_GENERATION_NUTS} орешка.\n\n"
+            "Для привязки нужно два коротких голосовых сообщения: сначала пример голоса, "
+            "потом проверочная фраза от Suno."
+        )
+
+    await update.message.reply_text(
+        text,
+        reply_markup=custom_voice_profile_keyboard(has_voice, contextual=contextual),
+    )
+
+    return PROFILE_VIEW
+
+
+async def begin_custom_voice_setup(update: Update, context: ContextTypes.DEFAULT_TYPE, from_voice_selection=False):
+    context.user_data["custom_voice_from_voice_selection"] = from_voice_selection
+    context.user_data.pop("custom_voice_validation_task_id", None)
+    context.user_data.pop("custom_voice_validation_phrase", None)
+
+    await update.message.reply_text(
+        "🎙 Создание своего голоса\n\n"
+        "Важно: отправляй только свой голос или голос человека, который разрешил создать колыбельную с его голосом.\n\n"
+        "Сейчас мы сохраним голос один раз. Потом его можно будет использовать в новых колыбельных, "
+        f"и каждая такая генерация будет стоить {CUSTOM_VOICE_GENERATION_NUTS} орешка.",
+        reply_markup=custom_voice_consent_keyboard(),
+    )
+
+    return CUSTOM_VOICE_CONSENT
+
+
+async def cancel_custom_voice_setup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("custom_voice_validation_task_id", None)
+    context.user_data.pop("custom_voice_validation_phrase", None)
+
+    if context.user_data.pop("custom_voice_from_voice_selection", False):
+        return await show_state_prompt(update, context, VOICE)
+
+    return await show_profile(update, update.effective_user.id, contextual=True)
+
+
+async def custom_voice_consent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+
+    if is_home(text):
+        return await show_main_menu(update, context)
+
+    if is_back(text):
+        return await cancel_custom_voice_setup(update, context)
+
+    if text != "✅ Подтверждаю и записываю голос":
+        await update.message.reply_text(
+            "Чтобы продолжить, нажми кнопку подтверждения.",
+            reply_markup=custom_voice_consent_keyboard(),
+        )
+        return CUSTOM_VOICE_CONSENT
+
+    await update.message.reply_text(
+        "🎙 Шаг 1 из 2\n\n"
+        "Отправь голосовое сообщение или аудиофайл на 10-20 секунд.\n\n"
+        "Лучше записать тихо, без музыки на фоне: можно напеть пару мягких строк или спокойно сказать несколько фраз.",
+        reply_markup=keyboard([["⬅️ Вернуться назад"]], with_nav=False),
+    )
+
+    return CUSTOM_VOICE_SOURCE
+
+
+def get_audio_attachment(message):
+    if message.voice:
+        return message.voice, "voice.ogg"
+
+    if message.audio:
+        return message.audio, message.audio.file_name or "voice_audio.mp3"
+
+    if message.document:
+        mime_type = message.document.mime_type or ""
+        file_name = message.document.file_name or "voice_file"
+
+        if mime_type.startswith("audio/"):
+            return message.document, file_name
+
+    return None, None
+
+
+async def download_voice_attachment(update: Update):
+    attachment, file_name = get_audio_attachment(update.message)
+
+    if not attachment:
+        raise ValueError("Отправь именно голосовое сообщение или аудиофайл.")
+
+    if attachment.file_size and attachment.file_size > CUSTOM_VOICE_MAX_FILE_BYTES:
+        raise ValueError("Файл слишком большой. Отправь аудио до 20 МБ.")
+
+    temp_dir = tempfile.mkdtemp(prefix="kolybelka_voice_")
+    safe_file_name = clean_filename(file_name) or "voice.ogg"
+    file_path = os.path.join(temp_dir, safe_file_name)
+
+    telegram_file = await attachment.get_file()
+    await telegram_file.download_to_drive(file_path)
+
+    return file_path, temp_dir, safe_file_name
+
+
+async def custom_voice_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text and is_home(update.message.text):
+        return await show_main_menu(update, context)
+
+    if update.message.text and is_back(update.message.text):
+        return await cancel_custom_voice_setup(update, context)
+
+    temp_dir = None
+
+    try:
+        file_path, temp_dir, file_name = await download_voice_attachment(update)
+        await update.message.reply_text("🎙 Получила запись. Загружаю голос и готовлю проверочную фразу...")
+
+        voice_url = await asyncio.to_thread(upload_file_to_suno, file_path, file_name)
+        validation_task_id = await asyncio.to_thread(create_voice_validation_task, voice_url)
+        phrase = await asyncio.to_thread(wait_for_voice_validation_phrase, validation_task_id)
+
+        context.user_data["custom_voice_validation_task_id"] = validation_task_id
+        context.user_data["custom_voice_validation_phrase"] = phrase
+
+        await update.message.reply_text(
+            "🎙 Шаг 2 из 2\n\n"
+            "Теперь запиши эту фразу голосовым сообщением. Лучше слегка напеть, а не просто прочитать:\n\n"
+            f"«{phrase}»",
+            reply_markup=keyboard([["⬅️ Вернуться назад"]], with_nav=False),
+        )
+        return CUSTOM_VOICE_VERIFY
+    except Exception as error:
+        await update.message.reply_text(
+            "😔 Не получилось подготовить голос.\n\n"
+            f"Причина: {error}\n\n"
+            "Попробуй отправить более чистую запись 10-20 секунд.",
+            reply_markup=keyboard([["⬅️ Вернуться назад"]], with_nav=False),
+        )
+        return CUSTOM_VOICE_SOURCE
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+async def custom_voice_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text and is_home(update.message.text):
+        return await show_main_menu(update, context)
+
+    if update.message.text and is_back(update.message.text):
+        return await cancel_custom_voice_setup(update, context)
+
+    validation_task_id = context.user_data.get("custom_voice_validation_task_id")
+
+    if not validation_task_id:
+        await update.message.reply_text("Не нашла проверочную фразу. Начнём запись голоса заново.")
+        return await begin_custom_voice_setup(
+            update,
+            context,
+            from_voice_selection=context.user_data.get("custom_voice_from_voice_selection", False),
+        )
+
+    temp_dir = None
+
+    try:
+        file_path, temp_dir, file_name = await download_voice_attachment(update)
+        await update.message.reply_text("🎙 Проверяю фразу и создаю голос. Это может занять несколько минут...")
+
+        verify_url = await asyncio.to_thread(upload_file_to_suno, file_path, file_name)
+        voice_name = f"Kolybelka voice {update.effective_user.id}"
+        voice_task_id = await asyncio.to_thread(
+            create_custom_voice_task,
+            validation_task_id,
+            verify_url,
+            voice_name,
+        )
+        voice_id = await asyncio.to_thread(wait_for_custom_voice_id, voice_task_id)
+
+        save_custom_voice_profile(
+            update.effective_user.id,
+            voice_id,
+            task_id=voice_task_id,
+            voice_name=voice_name,
+            status="ready",
+        )
+
+        context.user_data.pop("custom_voice_validation_task_id", None)
+        context.user_data.pop("custom_voice_validation_phrase", None)
+
+        if context.user_data.pop("custom_voice_from_voice_selection", False):
+            context.user_data["voice"] = CUSTOM_VOICE_OPTION
+            await update.message.reply_text(
+                "✅ Голос сохранён!\n\n"
+                "Теперь эта колыбельная будет создана с твоим голосом.\n\n"
+                "✨ Какое настроение сделать у колыбельной?",
+                reply_markup=keyboard([
+                    ["💗 Очень нежная"],
+                    ["🌟 Волшебная"],
+                    ["🌙 Спокойная"],
+                    ["🧚 Добрая сказочная"]
+                ]),
+            )
+            return MOOD
+
+        await update.message.reply_text(
+            "✅ Голос сохранён!\n\n"
+            f"Теперь можно создавать колыбельные с этим голосом. Каждая такая песня стоит {CUSTOM_VOICE_GENERATION_NUTS} орешка.",
+            reply_markup=profile_keyboard(),
+        )
+        return START
+    except Exception as error:
+        await update.message.reply_text(
+            "😔 Не получилось создать голос.\n\n"
+            f"Причина: {error}\n\n"
+            "Можно попробовать записать проверочную фразу ещё раз.",
+            reply_markup=keyboard([["⬅️ Вернуться назад"]], with_nav=False),
+        )
+        return CUSTOM_VOICE_VERIFY
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def build_nuts_offer_text():
@@ -2722,8 +3211,9 @@ def build_nuts_offer_text():
 
     return (
         "🌰 Орешки для персональных колыбельных\n\n"
-        "Каждый орешек — это одна готовая музыкальная колыбельная: "
-        "с именем ребёнка, любимыми героями, нежным голосом и спокойной музыкой.\n\n"
+        "Обычная колыбельная стоит 1 орешек: с именем ребёнка, любимыми героями, "
+        "нежным голосом и спокойной музыкой.\n"
+        "Премиум-колыбельная с твоим сохранённым голосом стоит 3 орешка за готовую песню.\n\n"
         "Выбери запас тёплых песен:\n\n"
         f"🌙 1 орешек — 🔵 {format_price(one_nut['price'])} ₽\n"
         "Для первой колыбельной, чтобы попробовать и услышать, как это звучит именно про вашего ребёнка.\n\n"
@@ -3191,11 +3681,7 @@ async def show_state_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if state == VOICE:
         await update.message.reply_text(
             "🎤 Вернёмся к выбору голоса:",
-            reply_markup=keyboard([
-                ["👩 Женский голос"],
-                ["👨 Мужской голос"],
-                ["🧒 Детский голос"]
-            ])
+            reply_markup=voice_selection_keyboard()
         )
         return VOICE
 
@@ -3299,6 +3785,14 @@ async def global_button(update: Update, context: ContextTypes.DEFAULT_TYPE, sour
         save_profile_return_state(context, source_state)
         return await show_buy_nuts_menu(update, contextual=source_state not in (None, START))
 
+    if text == CUSTOM_VOICE_OPTION:
+        save_profile_return_state(context, source_state)
+
+        if source_state == VOICE:
+            return await handle_custom_voice_choice(update, context)
+
+        return await show_custom_voice_profile(update, context, contextual=source_state not in (None, START))
+
     if text in NUT_PACKAGES:
         return await ask_payment_email(update, context, text)
 
@@ -3332,6 +3826,9 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "🌰 Купить орешки":
         return await show_buy_nuts_menu(update)
+
+    if text == CUSTOM_VOICE_OPTION:
+        return await show_custom_voice_profile(update, context, contextual=False)
 
     if text in NUT_PACKAGES:
         return await ask_payment_email(update, context, text)
@@ -3369,15 +3866,31 @@ async def profile_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("_profile_subview", None)
         return await start(update, context)
 
+    if is_home(text):
+        context.user_data.pop("_profile_return_state", None)
+        context.user_data.pop("_profile_subview", None)
+        return await show_main_menu(update, context)
+
     if is_support(text):
         return await begin_support_chat(update, context)
 
     if is_flow_return(text) or is_back(text):
         return await return_to_saved_flow_step(update, context)
 
+    if is_create_lullaby(text):
+        context.user_data.pop("_profile_return_state", None)
+        context.user_data.pop("_profile_subview", None)
+        return await begin_lullaby_creation(update, context)
+
     if text == "🌰 Купить орешки":
         context.user_data["_profile_subview"] = "buy"
         return await show_buy_nuts_menu(update, contextual=True)
+
+    if text == CUSTOM_VOICE_OPTION:
+        return await show_custom_voice_profile(update, context, contextual=True)
+
+    if text in ["🎙 Создать мой голос", "🔄 Перезаписать голос"]:
+        return await begin_custom_voice_setup(update, context)
 
     if text in NUT_PACKAGES:
         context.user_data["pending_payment_from_profile"] = True
@@ -3724,11 +4237,7 @@ async def char_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🎤 Выбери голос будущей музыкальной колыбельной:",
-        reply_markup=keyboard([
-            ["👩 Женский голос"],
-            ["👨 Мужской голос"],
-            ["🧒 Детский голос"]
-        ])
+        reply_markup=voice_selection_keyboard()
     )
 
     return VOICE
@@ -3737,6 +4246,38 @@ async def char_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # ГОЛОС
 # =========================
+
+async def handle_custom_voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if user_has_custom_voice(user_id):
+        if get_nuts(user_id) < CUSTOM_VOICE_GENERATION_NUTS:
+            await update.message.reply_text(
+                "🎙 Свой голос уже привязан.\n\n"
+                f"Колыбельная с ним стоит {CUSTOM_VOICE_GENERATION_NUTS} орешка, "
+                f"а сейчас на балансе: {get_nuts(user_id)}.\n\n"
+                "Пополните баланс, и можно будет создать песню с вашим голосом.",
+                reply_markup=buy_keyboard(),
+            )
+            return START
+
+        context.user_data["voice"] = CUSTOM_VOICE_OPTION
+        await update.message.reply_text(
+            "🎙 Выбран твой сохранённый голос.\n\n"
+            f"Эта музыкальная колыбельная будет стоить {CUSTOM_VOICE_GENERATION_NUTS} орешка.\n\n"
+            "✨ Какое настроение сделать у колыбельной?",
+            reply_markup=keyboard([
+                ["💗 Очень нежная"],
+                ["🌟 Волшебная"],
+                ["🌙 Спокойная"],
+                ["🧚 Добрая сказочная"]
+            ])
+        )
+        return MOOD
+
+    save_profile_return_state(context, VOICE)
+    return await begin_custom_voice_setup(update, context, from_voice_selection=True)
+
 
 async def voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -3754,16 +4295,15 @@ async def voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return CHAR_INPUT
 
+    if text == CUSTOM_VOICE_OPTION:
+        return await handle_custom_voice_choice(update, context)
+
     allowed = ["👩 Женский голос", "👨 Мужской голос", "🧒 Детский голос"]
 
     if text not in allowed:
         await update.message.reply_text(
             "🎤 Пожалуйста, выбери голос кнопкой.",
-            reply_markup=keyboard([
-                ["👩 Женский голос"],
-                ["👨 Мужской голос"],
-                ["🧒 Детский голос"]
-            ])
+            reply_markup=voice_selection_keyboard()
         )
         return VOICE
 
@@ -3795,11 +4335,7 @@ async def mood_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_back(text):
         await update.message.reply_text(
             "🎤 Вернёмся к выбору голоса:",
-            reply_markup=keyboard([
-                ["👩 Женский голос"],
-                ["👨 Мужской голос"],
-                ["🧒 Детский голос"]
-            ])
+            reply_markup=voice_selection_keyboard()
         )
         return VOICE
 
@@ -4255,10 +4791,13 @@ async def generate_music_button(update: Update, context: ContextTypes.DEFAULT_TY
 async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = context.user_data
+    nuts_cost = generation_nuts_cost(data)
+    nuts_cost_title = make_nuts_title(nuts_cost)
 
-    if get_nuts(user_id) < NUTS_PER_GENERATION:
+    if get_nuts(user_id) < nuts_cost:
         await update.message.reply_text(
-            "🌙 Для создания музыки нужен 1 орешек.",
+            f"🌙 Для создания этой музыки нужно {nuts_cost_title}.\n\n"
+            f"Сейчас на балансе: {get_nuts(user_id)}",
             reply_markup=buy_keyboard()
         )
         return START
@@ -4277,7 +4816,8 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🎵 {BRAND_NAME} создаёт музыкальную колыбельную...\n\n"
         f"Сейчас текст превратится в нежную песню для сна 🌙\n\n"
-        f"Обычно это занимает 3-5 минут.",
+        f"Обычно это занимает 3-5 минут.\n\n"
+        f"🌰 Орешки спишутся только после отправки готовой песни: {nuts_cost_title}",
         reply_markup=generation_wait_keyboard()
     )
 
@@ -4286,9 +4826,21 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         genitive_name = make_genitive_name(data["name"], data.get("gender", ""))
         title = f"Колыбельная {genitive_name}"
         style = make_music_style(data)
+        persona_id = None
+
+        if data.get("voice") == CUSTOM_VOICE_OPTION:
+            voice_profile = get_custom_voice_profile(user_id)
+            persona_id = voice_profile["voice_id"]
+
+            if not persona_id:
+                await update.message.reply_text(
+                    "🎙 Чтобы создать колыбельную своим голосом, сначала нужно привязать голос.",
+                    reply_markup=custom_voice_profile_keyboard(False, contextual=True),
+                )
+                return PROFILE_VIEW
 
         task_id = await asyncio.wait_for(
-            asyncio.to_thread(create_music_task, lullaby_text, style, title),
+            asyncio.to_thread(create_music_task, lullaby_text, style, title, persona_id),
             timeout=max(1, seconds_left(started_at, MUSIC_GENERATION_TIMEOUT_SECONDS)),
         )
 
@@ -4368,7 +4920,7 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         os.remove(file_path)
 
-        nuts_removed = remove_nuts(user_id, NUTS_PER_GENERATION)
+        nuts_removed = remove_nuts(user_id, nuts_cost)
         balance = get_nuts(user_id)
         mark_lullaby_created(user_id)
         add_lullabies(user_id, 1)
@@ -4386,7 +4938,7 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🌙 Всё готово!\n\n"
             f"Спасибо, что создали колыбельную в {BRAND_NAME} ✨\n\n"
-            f"🌰 Списан 1 орешек\n"
+            f"🌰 Списано: {nuts_cost_title}\n"
             f"Баланс: {balance} орешков\n\n"
             f"Можно создать новую колыбельную или зайти в личный кабинет.",
             reply_markup=main_menu_keyboard()
@@ -4439,7 +4991,8 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"🌰 Твой баланс: {nuts} орешков\n\n"
-        f"1 орешек = 1 персональная музыкальная колыбельная",
+        f"1 орешек = обычная персональная музыкальная колыбельная\n"
+        f"3 орешка = колыбельная с твоим сохранённым голосом",
         reply_markup=profile_keyboard()
     )
 
@@ -5207,6 +5760,7 @@ def main():
         "👤 Личный кабинет",
         "💬 Поддержка",
         "Поддержка",
+        CUSTOM_VOICE_OPTION,
         "🌙 Создать новую колыбельную",
         "Создать новую колыбельную",
         "🌙 Создать колыбельную",
@@ -5252,6 +5806,15 @@ def main():
             GENERATE_MUSIC: [global_button_handler(GENERATE_MUSIC), MessageHandler(filters.TEXT & ~filters.COMMAND, generate_music_button)],
             PAYMENT_EMAIL_INPUT: [global_button_handler(PAYMENT_EMAIL_INPUT), MessageHandler(filters.TEXT & ~filters.COMMAND, payment_email_input)],
             PROFILE_VIEW: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_view)],
+            CUSTOM_VOICE_CONSENT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, custom_voice_consent),
+            ],
+            CUSTOM_VOICE_SOURCE: [
+                MessageHandler((filters.VOICE | filters.AUDIO | filters.Document.ALL | filters.TEXT) & ~filters.COMMAND, custom_voice_source),
+            ],
+            CUSTOM_VOICE_VERIFY: [
+                MessageHandler((filters.VOICE | filters.AUDIO | filters.Document.ALL | filters.TEXT) & ~filters.COMMAND, custom_voice_verify),
+            ],
             SUPPORT_CHAT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, support_chat),
                 MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, support_attachment_handler),

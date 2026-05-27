@@ -143,7 +143,53 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertIn("499 ₽", offer_text)
         self.assertIn("3 орешка", offer_text)
         self.assertIn("599 ₽", offer_text)
-        self.assertIn("одна готовая музыкальная колыбельная", offer_text)
+        self.assertIn("Обычная колыбельная стоит 1 орешек", offer_text)
+        self.assertIn("сохранённым голосом стоит 3 орешка", offer_text)
+
+    def test_custom_voice_profile_is_saved_in_database(self):
+        user_id = 1017
+
+        bot.save_custom_voice_profile(
+            user_id,
+            "voice_123",
+            task_id="task_123",
+            voice_name="Голос мамы",
+        )
+
+        profile = bot.get_custom_voice_profile(user_id)
+
+        self.assertTrue(bot.user_has_custom_voice(user_id))
+        self.assertEqual(profile["voice_id"], "voice_123")
+        self.assertEqual(profile["task_id"], "task_123")
+        self.assertEqual(profile["voice_name"], "Голос мамы")
+        self.assertEqual(profile["status"], "ready")
+
+    def test_custom_voice_generation_cost_is_three_nuts(self):
+        self.assertEqual(bot.generation_nuts_cost({"voice": bot.CUSTOM_VOICE_OPTION}), 3)
+        self.assertEqual(bot.generation_nuts_cost({"voice": "👩 Женский голос"}), 1)
+
+    def test_create_music_task_uses_voice_persona_when_voice_id_is_passed(self):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"data": {"taskId": "music_task_1"}}
+
+        with patch("bot.requests.post", return_value=FakeResponse()) as post:
+            task_id = bot.create_music_task(
+                "lyrics",
+                "Russian lullaby",
+                "Колыбельная Марселя",
+                persona_id="voice_123",
+            )
+
+        payload = post.call_args.kwargs["json"]
+
+        self.assertEqual(task_id, "music_task_1")
+        self.assertEqual(payload["personaId"], "voice_123")
+        self.assertEqual(payload["personaModel"], "voice_persona")
+        self.assertEqual(payload["model"], "V5_5")
 
     def test_support_messages_are_saved(self):
         user_id = 1013
