@@ -131,8 +131,16 @@ class DatabaseHelpersTest(unittest.TestCase):
 
         self.assertIn("/commands", commands_text)
         self.assertIn("/addnuts user_id количество", commands_text)
+        self.assertIn("/addnuts me 10", commands_text)
         self.assertIn("/paystatus", commands_text)
         self.assertIn("/supportchatid", commands_text)
+
+    def test_user_exists_checks_database_without_creating_user(self):
+        self.assertFalse(bot.user_exists(42424242))
+
+        bot.create_user_id_if_not_exists(42424242)
+
+        self.assertTrue(bot.user_exists(42424242))
 
     def test_nuts_offer_text_includes_prices_and_value(self):
         offer_text = bot.build_nuts_offer_text()

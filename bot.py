@@ -1140,6 +1140,16 @@ def get_nuts(user_id):
     return row[0] if row else 0
 
 
+def user_exists(user_id):
+    with db_connection() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM users WHERE user_id = ?",
+            (user_id,)
+        ).fetchone()
+
+    return row is not None
+
+
 def get_lullabies(user_id):
     with db_connection() as conn:
         row = conn.execute(
@@ -2955,6 +2965,7 @@ async def show_profile(update: Update, user_id, contextual=False):
 
     await update.message.reply_text(
         f"👤 Личный кабинет\n\n"
+        f"Telegram ID: {user_id}\n"
         f"🌰 Твой баланс: {nuts} орешков\n\n"
         f"1 орешек = 1 обычная персональная музыкальная колыбельная.\n"
         f"3 орешка = колыбельная с твоим сохранённым голосом.\n\n"
@@ -4991,6 +5002,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"🌰 Твой баланс: {nuts} орешков\n\n"
+        f"Telegram ID: {update.effective_user.id}\n\n"
         f"1 орешек = обычная персональная музыкальная колыбельная\n"
         f"3 орешка = колыбельная с твоим сохранённым голосом",
         reply_markup=profile_keyboard()
@@ -5529,8 +5541,8 @@ def build_commands_text():
         "/cancel — отменить текущий сценарий и вернуться к главному меню.\n\n"
         "Админские команды:\n"
         "/commands — показать этот список команд.\n"
-        "/addnuts user_id количество — вручную начислить орешки пользователю.\n"
-        "/removenuts user_id количество — вручную списать орешки у пользователя.\n"
+        "/addnuts user_id количество — вручную начислить орешки пользователю. Можно написать `/addnuts me 10`, чтобы начислить себе.\n"
+        "/removenuts user_id количество — вручную списать орешки у пользователя. Можно написать `/removenuts me 10`, чтобы списать у себя.\n"
         "/broadcast текст — отправить произвольную рассылку всем пользователям.\n"
         "/maintenance текст — отправить уведомление о техническом перерыве.\n"
         "/remindnow — вручную отправить мягкое напоминание подходящим пользователям.\n"
@@ -5544,6 +5556,13 @@ def build_commands_text():
         "/reply user_id текст — ответить пользователю от имени поддержки.\n"
         "/supportchatid — показать ID текущего чата для группы поддержки."
     )
+
+
+def parse_admin_target_user_id(update: Update, raw_user_id):
+    if raw_user_id.lower() in {"me", "self", "я", "себе"}:
+        return update.effective_user.id
+
+    return int(raw_user_id)
 
 
 async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5564,30 +5583,48 @@ async def addnuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🌰 Формат команды:\n"
             "/addnuts user_id количество\n\n"
             "Например:\n"
-            "/addnuts 123456789 1"
+            "/addnuts 123456789 1\n"
+            "/addnuts me 40"
         )
         return
 
     try:
-        target_user_id = int(context.args[0])
+        target_user_id = parse_admin_target_user_id(update, context.args[0])
         amount = int(context.args[1])
     except ValueError:
-        await update.message.reply_text("🌙 user_id и количество должны быть числами.")
+        await update.message.reply_text("🌙 user_id должен быть числом или `me`, количество должно быть числом.")
         return
 
     if amount <= 0 or amount > 100:
         await update.message.reply_text("🌙 Количество орешков должно быть от 1 до 100.")
         return
 
-    create_user_id_if_not_exists(target_user_id)
+    if not user_exists(target_user_id):
+        await update.message.reply_text(
+            "🌙 Такого пользователя пока нет в базе.\n\n"
+            f"ID: {target_user_id}\n\n"
+            "Проверь цифры или попроси пользователя сначала нажать /start в боте.\n"
+            "Чтобы начислить себе, используй:\n"
+            f"/addnuts me {amount}"
+        )
+        return
+
     add_nuts(target_user_id, amount)
     balance = get_nuts(target_user_id)
+    admin_note = ""
+
+    if target_user_id != update.effective_user.id:
+        admin_note = (
+            f"\n\nТвой ID: {update.effective_user.id}\n"
+            "Проверь, что орешки начислены именно нужному пользователю."
+        )
 
     await update.message.reply_text(
         "✅ Орешки начислены вручную.\n\n"
         f"Пользователь: {target_user_id}\n"
         f"Начислено: {amount}\n"
         f"Баланс: {balance}"
+        f"{admin_note}"
     )
 
     try:
@@ -5614,22 +5651,30 @@ async def removenuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "🌰 Формат команды:\n"
             "/removenuts user_id количество\n\n"
             "Например:\n"
-            "/removenuts 123456789 1"
+            "/removenuts 123456789 1\n"
+            "/removenuts me 10"
         )
         return
 
     try:
-        target_user_id = int(context.args[0])
+        target_user_id = parse_admin_target_user_id(update, context.args[0])
         amount = int(context.args[1])
     except ValueError:
-        await update.message.reply_text("🌙 user_id и количество должны быть числами.")
+        await update.message.reply_text("🌙 user_id должен быть числом или `me`, количество должно быть числом.")
         return
 
     if amount <= 0 or amount > 100:
         await update.message.reply_text("🌙 Количество орешков должно быть от 1 до 100.")
         return
 
-    create_user_id_if_not_exists(target_user_id)
+    if not user_exists(target_user_id):
+        await update.message.reply_text(
+            "🌙 Такого пользователя пока нет в базе.\n\n"
+            f"ID: {target_user_id}\n\n"
+            "Проверь цифры или попроси пользователя сначала нажать /start в боте."
+        )
+        return
+
     balance_before = get_nuts(target_user_id)
 
     if balance_before < amount:
