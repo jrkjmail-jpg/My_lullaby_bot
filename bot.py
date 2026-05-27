@@ -53,6 +53,7 @@ ADMIN_IDS = {
 OPENAI_CLIENT = None
 TELEGRAM_EVENT_LOOP = None
 REMINDER_TASK = None
+BACKUP_TASK = None
 SUNO_BASE_URL = "https://api.sunoapi.org"
 YOOKASSA_BASE_URL = "https://api.yookassa.ru/v3"
 
@@ -84,7 +85,7 @@ REMINDERS_ENABLED = os.getenv("REMINDERS_ENABLED", "1").lower() in ("1", "true",
 REMINDER_AFTER_DAYS = int(os.getenv("REMINDER_AFTER_DAYS", "14"))
 REMINDER_INTERVAL_HOURS = int(os.getenv("REMINDER_INTERVAL_HOURS", "24"))
 AUTO_DB_BACKUP_ENABLED = os.getenv("AUTO_DB_BACKUP_ENABLED", "1").lower() in ("1", "true", "yes", "да")
-AUTO_DB_BACKUP_INTERVAL_HOURS = int(os.getenv("AUTO_DB_BACKUP_INTERVAL_HOURS", "6"))
+AUTO_DB_BACKUP_INTERVAL_HOURS = int(os.getenv("AUTO_DB_BACKUP_INTERVAL_HOURS", "24"))
 MAX_RESTORE_DB_BYTES = int(os.getenv("MAX_RESTORE_DB_BYTES", str(50 * 1024 * 1024)))
 SUPPORT_AI_ENABLED = os.getenv("SUPPORT_AI_ENABLED", "1").lower() in ("1", "true", "yes", "да")
 SUPPORT_AI_MODEL = os.getenv("SUPPORT_AI_MODEL", "gpt-5.5")
@@ -2503,10 +2504,6 @@ async def notify_payment_credited(app, result):
         ),
         reply_markup=profile_keyboard(),
     )
-    await send_database_backup_to_admins(
-        app.bot,
-        f"автобэкап после оплаты пользователя {order['user_id']}",
-    )
 
 
 def schedule_payment_notification(app, result):
@@ -4386,13 +4383,6 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return START
 
-        asyncio.create_task(
-            send_database_backup_to_admins(
-                context.bot,
-                f"автобэкап после списания орешка за колыбельную пользователя {user_id}",
-            )
-        )
-
         await update.message.reply_text(
             f"🌙 Всё готово!\n\n"
             f"Спасибо, что создали колыбельную в {BRAND_NAME} ✨\n\n"
@@ -4569,6 +4559,21 @@ async def send_database_backup_to_admins(bot, reason):
         mark_auto_backup_sent()
 
     return sent
+
+
+async def automatic_backup_worker(app):
+    await asyncio.sleep(300)
+
+    while True:
+        try:
+            await send_database_backup_to_admins(
+                app.bot,
+                f"плановый автобэкап раз в {AUTO_DB_BACKUP_INTERVAL_HOURS} ч",
+            )
+        except Exception as error:
+            print("Ошибка планового автобэкапа базы:", error)
+
+        await asyncio.sleep(max(3600, AUTO_DB_BACKUP_INTERVAL_HOURS * 3600))
 
 
 async def send_bulk_message(bot, user_ids, text, reply_markup=None, mark_reminders=False):
@@ -4910,12 +4915,6 @@ async def restoredb_document_handler(update: Update, context: ContextTypes.DEFAU
             f"Старая база сохранена: {previous_backup_path or 'старой базы не было'}"
         )
 
-        asyncio.create_task(
-            send_database_backup_to_admins(
-                context.bot,
-                "автобэкап после восстановления базы",
-            )
-        )
     except Exception as error:
         await update.message.reply_text(
             "⚠️ Не получилось восстановить базу.\n\n"
@@ -5037,12 +5036,6 @@ async def addnuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Начислено: {amount}\n"
         f"Баланс: {balance}"
     )
-    asyncio.create_task(
-        send_database_backup_to_admins(
-            context.bot,
-            f"автобэкап после ручного начисления пользователю {target_user_id}",
-        )
-    )
 
     try:
         await context.bot.send_message(
@@ -5104,12 +5097,6 @@ async def removenuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"Списано: {amount}\n"
         f"Баланс: {balance}"
     )
-    asyncio.create_task(
-        send_database_backup_to_admins(
-            context.bot,
-            f"автобэкап после ручного списания у пользователя {target_user_id}",
-        )
-    )
 
     try:
         await context.bot.send_message(
@@ -5164,11 +5151,14 @@ async def reminder_worker(app):
 
 
 async def on_app_start(app):
-    global TELEGRAM_EVENT_LOOP, REMINDER_TASK
+    global TELEGRAM_EVENT_LOOP, REMINDER_TASK, BACKUP_TASK
     TELEGRAM_EVENT_LOOP = asyncio.get_running_loop()
 
     if REMINDER_TASK is None or REMINDER_TASK.done():
         REMINDER_TASK = asyncio.create_task(reminder_worker(app))
+
+    if BACKUP_TASK is None or BACKUP_TASK.done():
+        BACKUP_TASK = asyncio.create_task(automatic_backup_worker(app))
 
 
 def main():
