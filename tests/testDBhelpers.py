@@ -152,6 +152,18 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertIn("3 орешка", offer_text)
         self.assertIn("599 ₽", offer_text)
         self.assertIn("Обычная колыбельная стоит 1 орешек", offer_text)
+        self.assertNotIn("сохранённым голосом", offer_text)
+
+    def test_custom_voice_offer_text_is_hidden_by_default(self):
+        with patch.object(bot, "CUSTOM_VOICE_PUBLIC_ENABLED", False):
+            offer_text = bot.build_nuts_offer_text()
+
+        self.assertNotIn("сохранённым голосом", offer_text)
+
+    def test_custom_voice_offer_text_can_be_enabled_later(self):
+        with patch.object(bot, "CUSTOM_VOICE_PUBLIC_ENABLED", True):
+            offer_text = bot.build_nuts_offer_text()
+
         self.assertIn("сохранённым голосом стоит 3 орешка", offer_text)
 
     def test_custom_voice_profile_is_saved_in_database(self):

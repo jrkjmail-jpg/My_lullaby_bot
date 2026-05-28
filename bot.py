@@ -91,6 +91,7 @@ AUTO_DB_BACKUP_INTERVAL_HOURS = int(os.getenv("AUTO_DB_BACKUP_INTERVAL_HOURS", "
 MAX_RESTORE_DB_BYTES = int(os.getenv("MAX_RESTORE_DB_BYTES", str(50 * 1024 * 1024)))
 SUPPORT_AI_ENABLED = os.getenv("SUPPORT_AI_ENABLED", "1").lower() in ("1", "true", "yes", "да")
 SUPPORT_AI_MODEL = os.getenv("SUPPORT_AI_MODEL", "gpt-5.5")
+CUSTOM_VOICE_PUBLIC_ENABLED = os.getenv("CUSTOM_VOICE_PUBLIC_ENABLED", "").lower() in ("1", "true", "yes", "да")
 SUPPORT_ADMIN_CHAT_ID_RAW = os.getenv("SUPPORT_ADMIN_CHAT_ID", "").strip()
 SUPPORT_ADMIN_CHAT_ID = (
     int(SUPPORT_ADMIN_CHAT_ID_RAW)
@@ -434,22 +435,30 @@ def main_menu_keyboard():
 
 
 def profile_keyboard():
-    return keyboard([
+    rows = [
         ["🌰 Купить орешки"],
-        [CUSTOM_VOICE_OPTION],
         ["🌙 Создать новую колыбельную"],
         ["💬 Поддержка"],
-    ], with_nav=False)
+    ]
+
+    if CUSTOM_VOICE_PUBLIC_ENABLED:
+        rows.insert(1, [CUSTOM_VOICE_OPTION])
+
+    return keyboard(rows, with_nav=False)
 
 
 def flow_profile_keyboard():
+    rows = [
+        ["🌰 Купить орешки"],
+        ["💬 Поддержка"],
+        ["⬅️ Вернуться назад"],
+    ]
+
+    if CUSTOM_VOICE_PUBLIC_ENABLED:
+        rows.insert(1, [CUSTOM_VOICE_OPTION])
+
     return ReplyKeyboardMarkup(
-        [
-            ["🌰 Купить орешки"],
-            [CUSTOM_VOICE_OPTION],
-            ["💬 Поддержка"],
-            ["⬅️ Вернуться назад"],
-        ],
+        rows,
         resize_keyboard=True,
         one_time_keyboard=False,
     )
@@ -523,12 +532,16 @@ def create_music_keyboard():
 
 
 def voice_selection_keyboard():
-    return keyboard([
+    rows = [
         ["👩 Женский голос"],
         ["👨 Мужской голос"],
         ["🧒 Детский голос"],
-        [CUSTOM_VOICE_OPTION],
-    ])
+    ]
+
+    if CUSTOM_VOICE_PUBLIC_ENABLED:
+        rows.append([CUSTOM_VOICE_OPTION])
+
+    return keyboard(rows)
 
 
 def custom_voice_profile_keyboard(has_voice, contextual=True):
@@ -1877,6 +1890,11 @@ def ask_support_ai(user_id, user_message):
     nuts = get_nuts(user_id)
     lullabies = get_lullabies(user_id)
     keyword_escalation = support_needs_admin_by_keywords(user_message)
+    custom_voice_support_line = (
+        "- колыбельная с сохранённым голосом пользователя стоит 3 орешка;\n"
+        if CUSTOM_VOICE_PUBLIC_ENABLED
+        else ""
+    )
 
     prompt = f"""
 Ты ИИ-поддержка Telegram-бота "{BRAND_NAME}".
@@ -1884,7 +1902,7 @@ def ask_support_ai(user_id, user_message):
 Что делает бот:
 - создаёт персональные музыкальные колыбельные для детей;
 - обычная колыбельная стоит 1 орешек;
-- колыбельная с сохранённым голосом пользователя стоит 3 орешка;
+{custom_voice_support_line.rstrip()}
 - цены: 1 орешек 349 ₽, 2 орешка 499 ₽, 3 орешка 599 ₽;
 - орешки списываются только после отправки готовой музыкальной колыбельной;
 - если текст или музыка не создались из-за ошибки или таймаута, орешек не списывается;
@@ -2922,8 +2940,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     f"— любимые персонажи\n"
     f"— нежный голос и спокойная музыка\n\n"
     f"✨ Получается настоящая колыбельная, под которую ребёнок засыпает быстрее и спокойнее 🌙\n\n"
-    f"🌰 Обычная колыбельная стоит 1 орешек\n"
-    f"🎙 Колыбельная с твоим сохранённым голосом — 3 орешка\n\n"
+    f"🌰 1 орешек = 1 персональная музыкальная колыбельная\n\n"
     f"💛 Давай создадим первую прямо сейчас:",
     reply_markup=main_menu_keyboard()
     )
@@ -2942,8 +2959,7 @@ async def offer_buy_nuts(update: Update, user_id):
     await update.message.reply_text(
         f"🌙 На балансе пока нет орешков.\n\n"
         f"Сейчас доступно: {nuts}\n"
-        f"Обычная колыбельная стоит 1 орешек.\n"
-        f"Колыбельная с твоим сохранённым голосом стоит 3 орешка.\n\n"
+        f"Для создания колыбельной нужен 1 орешек.\n\n"
         f"Выбери количество орешков, и после оплаты можно будет сразу начать создание.",
         reply_markup=buy_keyboard()
     )
@@ -2956,20 +2972,26 @@ def save_profile_return_state(context: ContextTypes.DEFAULT_TYPE, source_state):
 
 async def show_profile(update: Update, user_id, contextual=False):
     nuts = get_nuts(user_id)
-    voice_profile = get_custom_voice_profile(user_id)
-    voice_line = (
-        "🎙 Свой голос: привязан"
-        if voice_profile["voice_id"] and voice_profile["status"] == "ready"
-        else "🎙 Свой голос: не привязан"
-    )
+    custom_voice_text = ""
+
+    if CUSTOM_VOICE_PUBLIC_ENABLED:
+        voice_profile = get_custom_voice_profile(user_id)
+        voice_line = (
+            "🎙 Свой голос: привязан"
+            if voice_profile["voice_id"] and voice_profile["status"] == "ready"
+            else "🎙 Свой голос: не привязан"
+        )
+        custom_voice_text = (
+            f"3 орешка = колыбельная с твоим сохранённым голосом.\n\n"
+            f"{voice_line}\n\n"
+        )
 
     await update.message.reply_text(
         f"👤 Личный кабинет\n\n"
         f"Telegram ID: {user_id}\n"
         f"🌰 Твой баланс: {nuts} орешков\n\n"
-        f"1 орешек = 1 обычная персональная музыкальная колыбельная.\n"
-        f"3 орешка = колыбельная с твоим сохранённым голосом.\n\n"
-        f"{voice_line}\n\n"
+        f"1 орешек = 1 персональная музыкальная колыбельная.\n\n"
+        f"{custom_voice_text}"
         f"Здесь можно купить орешки"
         f"{' и вернуться к созданию колыбельной' if contextual else ' или сразу создать новую колыбельную 🌙'}",
         reply_markup=flow_profile_keyboard() if contextual else profile_keyboard()
@@ -2979,6 +3001,9 @@ async def show_profile(update: Update, user_id, contextual=False):
 
 
 async def show_custom_voice_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, contextual=True):
+    if not CUSTOM_VOICE_PUBLIC_ENABLED:
+        return await show_main_menu(update, context)
+
     user_id = update.effective_user.id
     profile = get_custom_voice_profile(user_id)
     has_voice = bool(profile["voice_id"] and profile["status"] == "ready")
@@ -3010,6 +3035,9 @@ async def show_custom_voice_profile(update: Update, context: ContextTypes.DEFAUL
 
 
 async def begin_custom_voice_setup(update: Update, context: ContextTypes.DEFAULT_TYPE, from_voice_selection=False):
+    if not CUSTOM_VOICE_PUBLIC_ENABLED:
+        return await show_main_menu(update, context)
+
     context.user_data["custom_voice_from_voice_selection"] = from_voice_selection
     context.user_data.pop("custom_voice_validation_task_id", None)
     context.user_data.pop("custom_voice_validation_phrase", None)
@@ -3036,6 +3064,9 @@ async def cancel_custom_voice_setup(update: Update, context: ContextTypes.DEFAUL
 
 
 async def custom_voice_consent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not CUSTOM_VOICE_PUBLIC_ENABLED:
+        return await show_main_menu(update, context)
+
     text = update.message.text
 
     if is_home(text):
@@ -3098,6 +3129,9 @@ async def download_voice_attachment(update: Update):
 
 
 async def custom_voice_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not CUSTOM_VOICE_PUBLIC_ENABLED:
+        return await show_main_menu(update, context)
+
     if update.message.text and is_home(update.message.text):
         return await show_main_menu(update, context)
 
@@ -3138,6 +3172,9 @@ async def custom_voice_source(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def custom_voice_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not CUSTOM_VOICE_PUBLIC_ENABLED:
+        return await show_main_menu(update, context)
+
     if update.message.text and is_home(update.message.text):
         return await show_main_menu(update, context)
 
@@ -3219,12 +3256,18 @@ def build_nuts_offer_text():
     one_nut = NUT_PACKAGES["🌰 Купить 1 орешек"]
     two_nuts = NUT_PACKAGES["🌰 Купить 2 орешка"]
     three_nuts = NUT_PACKAGES["🌰 Купить 3 орешка"]
+    custom_voice_line = (
+        "Премиум-колыбельная с твоим сохранённым голосом стоит 3 орешка за готовую песню.\n\n"
+        if CUSTOM_VOICE_PUBLIC_ENABLED
+        else ""
+    )
 
     return (
         "🌰 Орешки для персональных колыбельных\n\n"
         "Обычная колыбельная стоит 1 орешек: с именем ребёнка, любимыми героями, "
         "нежным голосом и спокойной музыкой.\n"
-        "Премиум-колыбельная с твоим сохранённым голосом стоит 3 орешка за готовую песню.\n\n"
+        f"{custom_voice_line}"
+        "\n"
         "Выбери запас тёплых песен:\n\n"
         f"🌙 1 орешек — 🔵 {format_price(one_nut['price'])} ₽\n"
         "Для первой колыбельной, чтобы попробовать и услышать, как это звучит именно про вашего ребёнка.\n\n"
@@ -3796,7 +3839,7 @@ async def global_button(update: Update, context: ContextTypes.DEFAULT_TYPE, sour
         save_profile_return_state(context, source_state)
         return await show_buy_nuts_menu(update, contextual=source_state not in (None, START))
 
-    if text == CUSTOM_VOICE_OPTION:
+    if CUSTOM_VOICE_PUBLIC_ENABLED and text == CUSTOM_VOICE_OPTION:
         save_profile_return_state(context, source_state)
 
         if source_state == VOICE:
@@ -3838,7 +3881,7 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🌰 Купить орешки":
         return await show_buy_nuts_menu(update)
 
-    if text == CUSTOM_VOICE_OPTION:
+    if CUSTOM_VOICE_PUBLIC_ENABLED and text == CUSTOM_VOICE_OPTION:
         return await show_custom_voice_profile(update, context, contextual=False)
 
     if text in NUT_PACKAGES:
@@ -3897,10 +3940,10 @@ async def profile_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["_profile_subview"] = "buy"
         return await show_buy_nuts_menu(update, contextual=True)
 
-    if text == CUSTOM_VOICE_OPTION:
+    if CUSTOM_VOICE_PUBLIC_ENABLED and text == CUSTOM_VOICE_OPTION:
         return await show_custom_voice_profile(update, context, contextual=True)
 
-    if text in ["🎙 Создать мой голос", "🔄 Перезаписать голос"]:
+    if CUSTOM_VOICE_PUBLIC_ENABLED and text in ["🎙 Создать мой голос", "🔄 Перезаписать голос"]:
         return await begin_custom_voice_setup(update, context)
 
     if text in NUT_PACKAGES:
@@ -4259,6 +4302,13 @@ async def char_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 async def handle_custom_voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not CUSTOM_VOICE_PUBLIC_ENABLED:
+        await update.message.reply_text(
+            "🎤 Пожалуйста, выбери голос кнопкой.",
+            reply_markup=voice_selection_keyboard(),
+        )
+        return VOICE
+
     user_id = update.effective_user.id
 
     if user_has_custom_voice(user_id):
@@ -4306,7 +4356,7 @@ async def voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return CHAR_INPUT
 
-    if text == CUSTOM_VOICE_OPTION:
+    if CUSTOM_VOICE_PUBLIC_ENABLED and text == CUSTOM_VOICE_OPTION:
         return await handle_custom_voice_choice(update, context)
 
     allowed = ["👩 Женский голос", "👨 Мужской голос", "🧒 Детский голос"]
@@ -5003,8 +5053,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🌰 Твой баланс: {nuts} орешков\n\n"
         f"Telegram ID: {update.effective_user.id}\n\n"
-        f"1 орешек = обычная персональная музыкальная колыбельная\n"
-        f"3 орешка = колыбельная с твоим сохранённым голосом",
+        f"1 орешек = персональная музыкальная колыбельная",
         reply_markup=profile_keyboard()
     )
 
@@ -5805,13 +5854,14 @@ def main():
         "👤 Личный кабинет",
         "💬 Поддержка",
         "Поддержка",
-        CUSTOM_VOICE_OPTION,
         "🌙 Создать новую колыбельную",
         "Создать новую колыбельную",
         "🌙 Создать колыбельную",
         "Создать колыбельную",
         *NUT_PACKAGES.keys(),
     ]
+    if CUSTOM_VOICE_PUBLIC_ENABLED:
+        global_button_texts.append(CUSTOM_VOICE_OPTION)
     global_button_filter = filters.Regex(
         "^(" + "|".join(re.escape(text) for text in global_button_texts) + ")$"
     )
