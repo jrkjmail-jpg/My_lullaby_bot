@@ -1163,6 +1163,41 @@ def user_exists(user_id):
     return row is not None
 
 
+def delete_user_data(user_id):
+    with db_connection() as conn:
+        counts = {
+            "users": conn.execute(
+                "SELECT COUNT(*) FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0],
+            "payments": conn.execute(
+                "SELECT COUNT(*) FROM payments WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0],
+            "support_messages": conn.execute(
+                "SELECT COUNT(*) FROM support_messages WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0],
+            "support_threads": conn.execute(
+                "SELECT COUNT(*) FROM support_threads WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0],
+            "support_admin_messages": conn.execute(
+                "SELECT COUNT(*) FROM support_admin_messages WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()[0],
+        }
+
+        conn.execute("DELETE FROM support_admin_messages WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM support_messages WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM support_threads WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM payments WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+
+    counts["total"] = sum(counts.values())
+    return counts
+
+
 def get_lullabies(user_id):
     with db_connection() as conn:
         row = conn.execute(
@@ -5592,6 +5627,7 @@ def build_commands_text():
         "/commands — показать этот список команд.\n"
         "/addnuts user_id количество — вручную начислить орешки пользователю. Можно написать `/addnuts me 10`, чтобы начислить себе.\n"
         "/removenuts user_id количество — вручную списать орешки у пользователя. Можно написать `/removenuts me 10`, чтобы списать у себя.\n"
+        "/deleteuser user_id confirm — удалить клиента из базы: личный кабинет, орешки, платежи и поддержку.\n"
         "/broadcast текст — отправить произвольную рассылку всем пользователям.\n"
         "/maintenance текст — отправить уведомление о техническом перерыве.\n"
         "/remindnow — вручную отправить мягкое напоминание подходящим пользователям.\n"
@@ -5757,6 +5793,59 @@ async def removenuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
     except Exception as error:
         print("Не удалось уведомить пользователя о ручном списании:", error)
+
+
+async def deleteuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return
+
+    if len(context.args) != 2 or context.args[1].lower() != "confirm":
+        await update.message.reply_text(
+            "🗑 Формат команды:\n"
+            "/deleteuser user_id confirm\n\n"
+            "Например:\n"
+            "/deleteuser 123456789 confirm\n\n"
+            "Команда удалит из базы личный кабинет, баланс орешков, платежи, обращения в поддержку "
+            "и служебные привязки этого пользователя.\n\n"
+            "Telegram-чат физически не удаляется: если человек снова напишет боту или нажмёт /start, "
+            "он появится как новый пользователь."
+        )
+        return
+
+    try:
+        target_user_id = parse_admin_target_user_id(update, context.args[0])
+    except ValueError:
+        await update.message.reply_text("🌙 user_id должен быть числом или `me`.")
+        return
+
+    counts = delete_user_data(target_user_id)
+
+    target_user_data = context.application.user_data.get(target_user_id)
+    if target_user_data is not None:
+        target_user_data.clear()
+
+    target_chat_data = context.application.chat_data.get(target_user_id)
+    if target_chat_data is not None:
+        target_chat_data.clear()
+
+    if counts["total"] == 0:
+        await update.message.reply_text(
+            "🌙 Данных по этому пользователю в базе не было.\n\n"
+            f"Пользователь: {target_user_id}"
+        )
+        return
+
+    await update.message.reply_text(
+        "✅ Клиент удалён из базы.\n\n"
+        f"Пользователь: {target_user_id}\n"
+        f"Личный кабинет: {counts['users']}\n"
+        f"Платежи: {counts['payments']}\n"
+        f"Сообщения поддержки: {counts['support_messages']}\n"
+        f"Тред поддержки: {counts['support_threads']}\n"
+        f"Служебные сообщения поддержки: {counts['support_admin_messages']}\n\n"
+        "Если он снова нажмёт /start, бот создаст ему новый пустой личный кабинет."
+    )
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -5949,6 +6038,7 @@ def main():
     app.add_handler(CommandHandler("Commands", commands_command), group=-1)
     app.add_handler(CommandHandler("addnuts", addnuts_command), group=-1)
     app.add_handler(CommandHandler("removenuts", removenuts_command), group=-1)
+    app.add_handler(CommandHandler("deleteuser", deleteuser_command), group=-1)
     app.add_handler(CommandHandler("reply", support_reply_command), group=-1)
     app.add_handler(CommandHandler("supportchatid", supportchatid_command), group=-1)
     app.add_handler(MessageHandler(filters.Regex("^/?Commands$"), commands_command), group=-1)

@@ -132,6 +132,7 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertIn("/commands", commands_text)
         self.assertIn("/addnuts user_id количество", commands_text)
         self.assertIn("/addnuts me 10", commands_text)
+        self.assertIn("/deleteuser user_id confirm", commands_text)
         self.assertIn("/paystatus", commands_text)
         self.assertIn("/supportchatid", commands_text)
 
@@ -141,6 +142,26 @@ class DatabaseHelpersTest(unittest.TestCase):
         bot.create_user_id_if_not_exists(42424242)
 
         self.assertTrue(bot.user_exists(42424242))
+
+    def test_delete_user_data_removes_client_records(self):
+        user_id = 42424243
+        bot.create_user_id_if_not_exists(user_id)
+        bot.add_nuts(user_id, 7)
+        bot.create_local_payment_order(user_id, "🌰 Купить 1 орешек", "client@example.com")
+        bot.log_support_message(user_id, "user", "Нужна помощь")
+        bot.remember_support_admin_message(-100500, 77, user_id)
+
+        counts = bot.delete_user_data(user_id)
+
+        self.assertEqual(counts["users"], 1)
+        self.assertEqual(counts["payments"], 1)
+        self.assertEqual(counts["support_messages"], 1)
+        self.assertEqual(counts["support_threads"], 1)
+        self.assertEqual(counts["support_admin_messages"], 1)
+        self.assertFalse(bot.user_exists(user_id))
+        self.assertEqual(bot.get_nuts(user_id), 0)
+        self.assertEqual(bot.get_recent_support_messages(user_id), [])
+        self.assertIsNone(bot.get_support_user_by_admin_message(-100500, 77))
 
     def test_nuts_offer_text_includes_prices_and_value(self):
         offer_text = bot.build_nuts_offer_text()
