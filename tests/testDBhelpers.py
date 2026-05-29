@@ -117,6 +117,42 @@ class DatabaseHelpersTest(unittest.TestCase):
         finally:
             bot.YOOKASSA_SECRET_KEY = original_secret
 
+    def test_yookassa_webhook_token_authorization(self):
+        original_token = bot.YOOKASSA_WEBHOOK_TOKEN
+
+        try:
+            bot.YOOKASSA_WEBHOOK_TOKEN = "secret-token"
+
+            authorized = SimpleNamespace(
+                path="/yookassa-webhook?token=secret-token",
+                headers={},
+            )
+            unauthorized = SimpleNamespace(
+                path="/yookassa-webhook?token=wrong",
+                headers={},
+            )
+            header_authorized = SimpleNamespace(
+                path="/yookassa-webhook",
+                headers={"X-Webhook-Token": "secret-token"},
+            )
+
+            self.assertTrue(bot.is_yookassa_webhook_authorized(authorized))
+            self.assertTrue(bot.is_yookassa_webhook_authorized(header_authorized))
+            self.assertFalse(bot.is_yookassa_webhook_authorized(unauthorized))
+        finally:
+            bot.YOOKASSA_WEBHOOK_TOKEN = original_token
+
+    def test_yookassa_webhook_without_token_keeps_backward_compatibility(self):
+        original_token = bot.YOOKASSA_WEBHOOK_TOKEN
+
+        try:
+            bot.YOOKASSA_WEBHOOK_TOKEN = ""
+            handler = SimpleNamespace(path="/yookassa-webhook", headers={})
+
+            self.assertTrue(bot.is_yookassa_webhook_authorized(handler))
+        finally:
+            bot.YOOKASSA_WEBHOOK_TOKEN = original_token
+
     def test_parse_age_allows_up_to_119_years(self):
         self.assertEqual(bot.parse_age("119")["display"], "119 лет")
         self.assertEqual(bot.parse_age("21")["display"], "21 год")
@@ -309,6 +345,15 @@ class DatabaseHelpersTest(unittest.TestCase):
                 "id": "yk_payment_2",
                 "status": "succeeded",
                 "paid": True,
+                "amount": {
+                    "value": "699.00",
+                    "currency": "RUB",
+                },
+                "metadata": {
+                    "local_payment_id": local_payment_id,
+                    "user_id": str(user.id),
+                    "nuts": "3",
+                },
             }
 
             result = bot.process_yookassa_webhook(payload)
@@ -317,6 +362,49 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertEqual(result["action"], "credited")
         self.assertEqual(repeated_result["action"], "already_credited")
         self.assertEqual(bot.get_nuts(user.id), 3)
+
+    def test_yookassa_webhook_rejects_amount_mismatch(self):
+        user = SimpleNamespace(id=10030, username="webhook_mismatch")
+        bot.create_user_if_not_exists(user)
+
+        local_payment_id = bot.create_local_payment_order(
+            user.id,
+            "🌰 Купить 3 орешка",
+            "webhook@example.com",
+        )
+        bot.update_payment_order(local_payment_id, "yk_payment_bad_amount", "pending", "https://pay.test")
+
+        payload = {
+            "type": "notification",
+            "event": "payment.succeeded",
+            "object": {
+                "id": "yk_payment_bad_amount",
+                "status": "succeeded",
+                "paid": True,
+            },
+        }
+
+        with patch("bot.get_yookassa_payment") as get_yookassa_payment:
+            get_yookassa_payment.return_value = {
+                "id": "yk_payment_bad_amount",
+                "status": "succeeded",
+                "paid": True,
+                "amount": {
+                    "value": "449.00",
+                    "currency": "RUB",
+                },
+                "metadata": {
+                    "local_payment_id": local_payment_id,
+                    "user_id": str(user.id),
+                    "nuts": "3",
+                },
+            }
+
+            result = bot.process_yookassa_webhook(payload)
+
+        self.assertEqual(result["action"], "security_rejected")
+        self.assertEqual(result["reason"], "amount_mismatch")
+        self.assertEqual(bot.get_nuts(user.id), 0)
 
     def test_yookassa_webhook_recovers_missing_local_order(self):
         user_id = 1004
@@ -354,6 +442,25 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertEqual(result["action"], "credited")
         self.assertEqual(repeated_result["action"], "already_credited")
         self.assertEqual(bot.get_nuts(user_id), 2)
+
+    def test_yookassa_recovery_rejects_wrong_amount(self):
+        confirmed_payment = {
+            "id": "yk_payment_wrong_recovery",
+            "status": "succeeded",
+            "paid": True,
+            "amount": {
+                "value": "1.00",
+                "currency": "RUB",
+            },
+            "metadata": {
+                "local_payment_id": "nuts_wrong_recovery",
+                "user_id": "10041",
+                "nuts": "3",
+            },
+        }
+
+        self.assertIsNone(bot.recover_payment_order_from_yookassa(confirmed_payment))
+        self.assertFalse(bot.user_exists(10041))
 
     def test_yookassa_webhook_missing_order_does_not_raise(self):
         payload = {

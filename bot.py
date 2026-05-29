@@ -11,9 +11,10 @@ import shutil
 import time
 import mimetypes
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -44,6 +45,7 @@ YOOKASSA_PAYMENT_MODE = os.getenv("YOOKASSA_PAYMENT_MODE", "full_prepayment")
 YOOKASSA_WEBHOOK_HOST = os.getenv("YOOKASSA_WEBHOOK_HOST", "0.0.0.0")
 YOOKASSA_WEBHOOK_PORT = int(os.getenv("YOOKASSA_WEBHOOK_PORT", "8080"))
 YOOKASSA_WEBHOOK_PATH = os.getenv("YOOKASSA_WEBHOOK_PATH", "/yookassa-webhook")
+YOOKASSA_WEBHOOK_TOKEN = os.getenv("YOOKASSA_WEBHOOK_TOKEN", "").strip()
 YOOKASSA_TEST_MODE = os.getenv("YOOKASSA_TEST_MODE", "").lower() in ("1", "true", "yes", "да")
 ADMIN_IDS = {
     int(user_id.strip())
@@ -98,6 +100,9 @@ SUPPORT_ADMIN_CHAT_ID = (
     if SUPPORT_ADMIN_CHAT_ID_RAW.lstrip("-").isdigit()
     else None
 )
+WEBHOOK_RATE_LIMIT = {}
+WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = 60
+WEBHOOK_RATE_LIMIT_MAX_REQUESTS = 60
 
 
 def is_path_inside(path, parent):
@@ -1326,6 +1331,74 @@ def get_package_info_by_nuts(nuts):
     return title, title
 
 
+def normalize_money(value):
+    try:
+        return f"{Decimal(str(value)).quantize(Decimal('0.01'))}"
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def get_payment_order_for_security_check(local_payment_id):
+    with db_connection() as conn:
+        row = conn.execute("""
+            SELECT user_id, nuts, amount_value, currency, yookassa_payment_id
+            FROM payments
+            WHERE local_payment_id = ?
+        """, (local_payment_id,)).fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "user_id": row[0],
+        "nuts": row[1],
+        "amount_value": row[2],
+        "currency": row[3],
+        "yookassa_payment_id": row[4],
+    }
+
+
+def validate_confirmed_payment_against_order(local_payment_id, yookassa_payment_id, confirmed_payment):
+    order = get_payment_order_for_security_check(local_payment_id)
+
+    if not order:
+        return True, ""
+
+    metadata = confirmed_payment.get("metadata") or {}
+    amount = confirmed_payment.get("amount") or {}
+
+    if order["yookassa_payment_id"] and order["yookassa_payment_id"] != yookassa_payment_id:
+        return False, "payment_id_mismatch"
+
+    if metadata.get("user_id") and str(order["user_id"]) != str(metadata.get("user_id")):
+        return False, "user_id_mismatch"
+
+    if metadata.get("nuts") and str(order["nuts"]) != str(metadata.get("nuts")):
+        return False, "nuts_mismatch"
+
+    expected_amount = normalize_money(order["amount_value"])
+    actual_amount = normalize_money(amount.get("value"))
+
+    if not expected_amount or not actual_amount or expected_amount != actual_amount:
+        return False, "amount_mismatch"
+
+    if (amount.get("currency") or "RUB") != order["currency"]:
+        return False, "currency_mismatch"
+
+    return True, ""
+
+
+def validate_recovered_payment_amount(nuts, amount_value, currency):
+    if currency != "RUB":
+        return False
+
+    for package in NUT_PACKAGES.values():
+        if package["nuts"] == nuts:
+            return normalize_money(amount_value) == normalize_money(package["price"])
+
+    return False
+
+
 def recover_payment_order_from_yookassa(confirmed_payment, fallback_local_payment_id=None):
     yookassa_payment_id = confirmed_payment.get("id")
     metadata = confirmed_payment.get("metadata") or {}
@@ -1346,6 +1419,10 @@ def recover_payment_order_from_yookassa(confirmed_payment, fallback_local_paymen
     amount = confirmed_payment.get("amount") or {}
     amount_value = amount.get("value") or "0.00"
     currency = amount.get("currency") or "RUB"
+
+    if not validate_recovered_payment_amount(nuts, amount_value, currency):
+        return None
+
     package_key, package_title = get_package_info_by_nuts(nuts)
 
     create_user_id_if_not_exists(user_id)
@@ -2747,6 +2824,25 @@ def process_yookassa_webhook(payload):
                 "yookassa_payment_id": yookassa_payment_id,
             }
 
+        is_valid, validation_error = validate_confirmed_payment_against_order(
+            local_payment_id,
+            yookassa_payment_id,
+            confirmed_payment,
+        )
+
+        if not is_valid:
+            print(
+                "Webhook ЮKassa: платеж не прошел проверку заказа",
+                yookassa_payment_id,
+                validation_error,
+            )
+            mark_payment_status(local_payment_id, f"security_{validation_error}")
+            return {
+                "action": "security_rejected",
+                "reason": validation_error,
+                "yookassa_payment_id": yookassa_payment_id,
+            }
+
         order, credited_now = credit_payment_if_needed(
             local_payment_id,
             yookassa_payment_id,
@@ -2822,6 +2918,34 @@ def schedule_payment_notification(app, result):
     asyncio.run(notify_payment_credited(app, result))
 
 
+def client_ip_from_handler(handler):
+    return handler.client_address[0] if handler.client_address else "unknown"
+
+
+def webhook_rate_limit_allows(client_ip):
+    now = time.monotonic()
+    window_started_at, count = WEBHOOK_RATE_LIMIT.get(client_ip, (now, 0))
+
+    if now - window_started_at > WEBHOOK_RATE_LIMIT_WINDOW_SECONDS:
+        WEBHOOK_RATE_LIMIT[client_ip] = (now, 1)
+        return True
+
+    count += 1
+    WEBHOOK_RATE_LIMIT[client_ip] = (window_started_at, count)
+    return count <= WEBHOOK_RATE_LIMIT_MAX_REQUESTS
+
+
+def is_yookassa_webhook_authorized(handler):
+    if not YOOKASSA_WEBHOOK_TOKEN:
+        return True
+
+    parsed = urlparse(handler.path)
+    query_token = (parse_qs(parsed.query).get("token") or [""])[0]
+    header_token = handler.headers.get("X-Webhook-Token", "")
+
+    return query_token == YOOKASSA_WEBHOOK_TOKEN or header_token == YOOKASSA_WEBHOOK_TOKEN
+
+
 def make_yookassa_webhook_handler(app):
     class YookassaWebhookHandler(BaseHTTPRequestHandler):
         def send_plain_response(self, status, body=""):
@@ -2837,7 +2961,7 @@ def make_yookassa_webhook_handler(app):
 
         def do_GET(self):
             if urlparse(self.path).path == YOOKASSA_WEBHOOK_PATH:
-                self.send_plain_response(HTTPStatus.OK, "YooKassa webhook is running")
+                self.send_plain_response(HTTPStatus.OK, "OK")
                 return
 
             self.send_plain_response(HTTPStatus.NOT_FOUND, "Not found")
@@ -2850,13 +2974,23 @@ def make_yookassa_webhook_handler(app):
                 self.send_plain_response(HTTPStatus.NOT_FOUND, "Not found")
                 return
 
+            client_ip = client_ip_from_handler(self)
+
+            if not webhook_rate_limit_allows(client_ip):
+                self.send_plain_response(HTTPStatus.TOO_MANY_REQUESTS, "Too many requests")
+                return
+
+            if not is_yookassa_webhook_authorized(self):
+                self.send_plain_response(HTTPStatus.FORBIDDEN, "Forbidden")
+                return
+
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 self.send_error(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
                 return
 
-            if content_length <= 0 or content_length > 1024 * 1024:
+            if content_length <= 0 or content_length > 64 * 1024:
                 self.send_error(HTTPStatus.BAD_REQUEST, "Invalid payload size")
                 return
 
@@ -3664,11 +3798,8 @@ async def support_group_reply_handler(update: Update, context: ContextTypes.DEFA
         )
 
     if not target_user_id:
-        target_user_id = get_last_support_user_for_admin_chat(update.effective_chat.id)
-
-    if not target_user_id:
         await update.message.reply_text(
-            "💬 Не поняла, кому ответить. Нажми «Ответить» на обращение пользователя "
+            "💬 Не поняла, кому ответить. Нажми «Ответить» именно на обращение пользователя "
             "или используй /reply user_id текст."
         )
         return
@@ -5168,7 +5299,7 @@ async def send_database_backup(bot, chat_ids, reason):
             f"Пользователей: {stats['users_count']}\n"
             f"Платежей: {stats['payments_count']}\n"
             f"Орешков на балансах: {stats['total_nuts']}\n\n"
-            "Сохрани этот файл. Если BotHost обнулит базу, её можно вернуть командой /restoredb."
+            "Сохрани этот файл. Если BotHost обнулит базу, её можно вернуть командой /restoredb confirm."
         )
 
         for chat_id in chat_ids:
@@ -5439,6 +5570,7 @@ async def paystatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     warnings = get_yookassa_config_warnings()
     mode = "тестовый" if YOOKASSA_TEST_MODE else "боевой"
     webhook_example = f"https://твой-домен{YOOKASSA_WEBHOOK_PATH}"
+    webhook_security = "включён" if YOOKASSA_WEBHOOK_TOKEN else "не включён"
 
     await update.message.reply_text(
         "💳 Настройки ЮKassa\n\n"
@@ -5448,6 +5580,7 @@ async def paystatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Return URL: {YOOKASSA_RETURN_URL}\n"
         f"Webhook path: {YOOKASSA_WEBHOOK_PATH}\n"
         f"Webhook port: {YOOKASSA_WEBHOOK_PORT}\n"
+        f"Webhook token: {webhook_security}\n"
         f"Webhook в ЮKassa должен быть: {webhook_example}\n\n"
         f"VAT code: {YOOKASSA_VAT_CODE}\n"
         f"Tax system code: {YOOKASSA_TAX_SYSTEM_CODE or 'не задан'}\n"
@@ -5514,6 +5647,15 @@ async def restoredb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🌙 Эта команда доступна только администратору.")
         return
 
+    if len(context.args) != 1 or context.args[0].lower() != "confirm":
+        await update.message.reply_text(
+            "🧷 Восстановление базы — опасная операция.\n\n"
+            "Она полностью заменит текущую SQLite-базу файлом, который ты отправишь следующим сообщением.\n\n"
+            "Чтобы продолжить, напиши:\n"
+            "/restoredb confirm"
+        )
+        return
+
     context.user_data["awaiting_db_restore"] = True
 
     await update.message.reply_text(
@@ -5536,13 +5678,23 @@ async def restoredb_document_handler(update: Update, context: ContextTypes.DEFAU
         return
 
     if document.file_size and document.file_size > MAX_RESTORE_DB_BYTES:
+        context.user_data.pop("awaiting_db_restore", None)
         await update.message.reply_text(
             "⚠️ Файл слишком большой для восстановления базы."
         )
         return
 
+    file_name = document.file_name or "kolybelka_restore.db"
+
+    if not file_name.lower().endswith((".db", ".sqlite", ".sqlite3")):
+        context.user_data.pop("awaiting_db_restore", None)
+        await update.message.reply_text(
+            "⚠️ Для восстановления нужен файл SQLite с расширением .db, .sqlite или .sqlite3."
+        )
+        return
+
     temp_dir = tempfile.mkdtemp(prefix="kolybelka_db_restore_")
-    restore_path = os.path.join(temp_dir, document.file_name or "kolybelka_restore.db")
+    restore_path = os.path.join(temp_dir, clean_filename(file_name) or "kolybelka_restore.db")
 
     try:
         telegram_file = await document.get_file()
@@ -5565,6 +5717,7 @@ async def restoredb_document_handler(update: Update, context: ContextTypes.DEFAU
         )
 
     except Exception as error:
+        context.user_data.pop("awaiting_db_restore", None)
         await update.message.reply_text(
             "⚠️ Не получилось восстановить базу.\n\n"
             f"Причина: {error}"
@@ -5637,7 +5790,7 @@ def build_commands_text():
         "/paystatus — проверить настройки ЮKassa без вывода секретного ключа.\n"
         "/storagecheck — проверить, что база лежит в постоянном хранилище.\n"
         "/backupdb — получить резервную копию базы в Telegram.\n"
-        "/restoredb — восстановить базу из файла .db.\n"
+        "/restoredb confirm — восстановить базу из файла .db после подтверждения.\n"
         "/reply user_id текст — ответить пользователю от имени поддержки.\n"
         "/supportchatid — показать ID текущего чата для группы поддержки."
     )

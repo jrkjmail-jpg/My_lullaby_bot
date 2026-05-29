@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+kolybelka_storage_probe.txt
+kolybelka_state.pkl
+kolybelka_before_restore_*.db
+kolybelka_backup_*.db
