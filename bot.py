@@ -96,6 +96,12 @@ MAX_RESTORE_DB_BYTES = int(os.getenv("MAX_RESTORE_DB_BYTES", str(50 * 1024 * 102
 SUPPORT_AI_ENABLED = os.getenv("SUPPORT_AI_ENABLED", "1").lower() in ("1", "true", "yes", "да")
 SUPPORT_AI_MODEL = os.getenv("SUPPORT_AI_MODEL", "gpt-5.5")
 CUSTOM_VOICE_PUBLIC_ENABLED = os.getenv("CUSTOM_VOICE_PUBLIC_ENABLED", "").lower() in ("1", "true", "yes", "да")
+CUSTOM_VOICE_ADMIN_ONLY = os.getenv("CUSTOM_VOICE_ADMIN_ONLY", "1").lower() in ("1", "true", "yes", "да")
+CUSTOM_VOICE_ALLOWED_IDS = {
+    int(user_id.strip())
+    for user_id in os.getenv("CUSTOM_VOICE_ALLOWED_IDS", "").split(",")
+    if user_id.strip().isdigit()
+}
 SUPPORT_ADMIN_CHAT_ID_RAW = os.getenv("SUPPORT_ADMIN_CHAT_ID", "").strip()
 SUPPORT_ADMIN_CHAT_ID = (
     int(SUPPORT_ADMIN_CHAT_ID_RAW)
@@ -439,6 +445,16 @@ def keyboard(buttons, with_nav=True):
     )
 
 
+def is_custom_voice_available(user_id=None):
+    if CUSTOM_VOICE_ALLOWED_IDS:
+        return user_id in CUSTOM_VOICE_ALLOWED_IDS if user_id is not None else False
+
+    if CUSTOM_VOICE_PUBLIC_ENABLED and not CUSTOM_VOICE_ADMIN_ONLY:
+        return True
+
+    return user_id in ADMIN_IDS if user_id is not None else False
+
+
 def main_menu_keyboard():
     return keyboard([
         ["🌙 Создать новую колыбельную"],
@@ -447,27 +463,27 @@ def main_menu_keyboard():
     ], with_nav=False)
 
 
-def profile_keyboard():
+def profile_keyboard(user_id=None):
     rows = [
         ["🌰 Купить орешки"],
         ["🌙 Создать новую колыбельную"],
         ["💬 Поддержка"],
     ]
 
-    if CUSTOM_VOICE_PUBLIC_ENABLED:
+    if is_custom_voice_available(user_id):
         rows.insert(1, [CUSTOM_VOICE_OPTION])
 
     return keyboard(rows, with_nav=False)
 
 
-def flow_profile_keyboard():
+def flow_profile_keyboard(user_id=None):
     rows = [
         ["🌰 Купить орешки"],
         ["💬 Поддержка"],
         ["⬅️ Вернуться назад"],
     ]
 
-    if CUSTOM_VOICE_PUBLIC_ENABLED:
+    if is_custom_voice_available(user_id):
         rows.insert(1, [CUSTOM_VOICE_OPTION])
 
     return ReplyKeyboardMarkup(
@@ -544,14 +560,14 @@ def create_music_keyboard():
     ])
 
 
-def voice_selection_keyboard():
+def voice_selection_keyboard(user_id=None):
     rows = [
         ["👩 Женский голос"],
         ["👨 Мужской голос"],
         ["🧒 Детский голос"],
     ]
 
-    if CUSTOM_VOICE_PUBLIC_ENABLED:
+    if is_custom_voice_available(user_id):
         rows.append([CUSTOM_VOICE_OPTION])
 
     return keyboard(rows)
@@ -2033,7 +2049,7 @@ def ask_support_ai(user_id, user_message):
     keyword_escalation = support_needs_admin_by_keywords(user_message)
     custom_voice_support_line = (
         "- колыбельная с сохранённым голосом пользователя стоит 3 орешка;\n"
-        if CUSTOM_VOICE_PUBLIC_ENABLED
+        if is_custom_voice_available(user_id)
         else ""
     )
 
@@ -2976,7 +2992,7 @@ async def notify_payment_credited(app, result):
             f"Текущий баланс: {result['balance']} орешков\n\n"
             "Теперь можно создать персональную колыбельную 🌙🎵"
         ),
-        reply_markup=profile_keyboard(),
+        reply_markup=profile_keyboard(order["user_id"]),
     )
 
 
@@ -3126,7 +3142,7 @@ async def send_payment_link(
     if not yookassa_is_configured():
         await update.message.reply_text(
             "😔 Оплата пока не настроена. Попробуй позже.",
-            reply_markup=profile_keyboard()
+            reply_markup=profile_keyboard(update.effective_user.id)
         )
         return
 
@@ -3216,7 +3232,7 @@ async def show_profile(update: Update, user_id, contextual=False):
     nuts = get_nuts(user_id)
     custom_voice_text = ""
 
-    if CUSTOM_VOICE_PUBLIC_ENABLED:
+    if is_custom_voice_available(user_id):
         voice_profile = get_custom_voice_profile(user_id)
         voice_line = (
             "🎙 Свой голос: привязан"
@@ -3236,17 +3252,18 @@ async def show_profile(update: Update, user_id, contextual=False):
         f"{custom_voice_text}"
         f"Здесь можно купить орешки"
         f"{' и вернуться к созданию колыбельной' if contextual else ' или сразу создать новую колыбельную 🌙'}",
-        reply_markup=flow_profile_keyboard() if contextual else profile_keyboard()
+        reply_markup=flow_profile_keyboard(user_id) if contextual else profile_keyboard(user_id)
     )
 
     return PROFILE_VIEW if contextual else START
 
 
 async def show_custom_voice_profile(update: Update, context: ContextTypes.DEFAULT_TYPE, contextual=True):
-    if not CUSTOM_VOICE_PUBLIC_ENABLED:
+    user_id = update.effective_user.id
+
+    if not is_custom_voice_available(user_id):
         return await show_main_menu(update, context)
 
-    user_id = update.effective_user.id
     profile = get_custom_voice_profile(user_id)
     has_voice = bool(profile["voice_id"] and profile["status"] == "ready")
 
@@ -3277,7 +3294,7 @@ async def show_custom_voice_profile(update: Update, context: ContextTypes.DEFAUL
 
 
 async def begin_custom_voice_setup(update: Update, context: ContextTypes.DEFAULT_TYPE, from_voice_selection=False):
-    if not CUSTOM_VOICE_PUBLIC_ENABLED:
+    if not is_custom_voice_available(update.effective_user.id):
         return await show_main_menu(update, context)
 
     context.user_data["custom_voice_from_voice_selection"] = from_voice_selection
@@ -3306,7 +3323,7 @@ async def cancel_custom_voice_setup(update: Update, context: ContextTypes.DEFAUL
 
 
 async def custom_voice_consent(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not CUSTOM_VOICE_PUBLIC_ENABLED:
+    if not is_custom_voice_available(update.effective_user.id):
         return await show_main_menu(update, context)
 
     text = update.message.text
@@ -3371,7 +3388,7 @@ async def download_voice_attachment(update: Update):
 
 
 async def custom_voice_source(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not CUSTOM_VOICE_PUBLIC_ENABLED:
+    if not is_custom_voice_available(update.effective_user.id):
         return await show_main_menu(update, context)
 
     if update.message.text and is_home(update.message.text):
@@ -3414,7 +3431,7 @@ async def custom_voice_source(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def custom_voice_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not CUSTOM_VOICE_PUBLIC_ENABLED:
+    if not is_custom_voice_available(update.effective_user.id):
         return await show_main_menu(update, context)
 
     if update.message.text and is_home(update.message.text):
@@ -3478,7 +3495,7 @@ async def custom_voice_verify(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             "✅ Голос сохранён!\n\n"
             f"Теперь можно создавать колыбельные с этим голосом. Каждая такая песня стоит {CUSTOM_VOICE_GENERATION_NUTS} орешка.",
-            reply_markup=profile_keyboard(),
+            reply_markup=profile_keyboard(update.effective_user.id),
         )
         return START
     except Exception as error:
@@ -3494,13 +3511,13 @@ async def custom_voice_verify(update: Update, context: ContextTypes.DEFAULT_TYPE
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def build_nuts_offer_text():
+def build_nuts_offer_text(user_id=None):
     one_nut = NUT_PACKAGES["🌰 Купить 1 орешек"]
     two_nuts = NUT_PACKAGES["🌰 Купить 2 орешка"]
     three_nuts = NUT_PACKAGES["🌰 Купить 3 орешка"]
     custom_voice_line = (
         "Премиум-колыбельная с твоим сохранённым голосом стоит 3 орешка за готовую песню.\n\n"
-        if CUSTOM_VOICE_PUBLIC_ENABLED
+        if is_custom_voice_available(user_id)
         else ""
     )
 
@@ -3524,7 +3541,7 @@ def build_nuts_offer_text():
 
 async def show_buy_nuts_menu(update: Update, contextual=False):
     await update.message.reply_text(
-        build_nuts_offer_text(),
+        build_nuts_offer_text(update.effective_user.id),
         reply_markup=flow_buy_keyboard() if contextual else buy_keyboard()
     )
 
@@ -4024,7 +4041,7 @@ async def show_state_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     if state == VOICE:
         await update.message.reply_text(
             "🎤 Вернёмся к выбору голоса:",
-            reply_markup=voice_selection_keyboard()
+            reply_markup=voice_selection_keyboard(update.effective_user.id)
         )
         return VOICE
 
@@ -4128,7 +4145,7 @@ async def global_button(update: Update, context: ContextTypes.DEFAULT_TYPE, sour
         save_profile_return_state(context, source_state)
         return await show_buy_nuts_menu(update, contextual=source_state not in (None, START))
 
-    if CUSTOM_VOICE_PUBLIC_ENABLED and text == CUSTOM_VOICE_OPTION:
+    if is_custom_voice_available(user_id) and text == CUSTOM_VOICE_OPTION:
         save_profile_return_state(context, source_state)
 
         if source_state == VOICE:
@@ -4170,7 +4187,7 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🌰 Купить орешки":
         return await show_buy_nuts_menu(update)
 
-    if CUSTOM_VOICE_PUBLIC_ENABLED and text == CUSTOM_VOICE_OPTION:
+    if is_custom_voice_available(user_id) and text == CUSTOM_VOICE_OPTION:
         return await show_custom_voice_profile(update, context, contextual=False)
 
     if text in NUT_PACKAGES:
@@ -4203,6 +4220,7 @@ async def start_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def profile_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    user_id = update.effective_user.id
 
     if is_restart(text):
         context.user_data.pop("_profile_return_state", None)
@@ -4229,10 +4247,10 @@ async def profile_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["_profile_subview"] = "buy"
         return await show_buy_nuts_menu(update, contextual=True)
 
-    if CUSTOM_VOICE_PUBLIC_ENABLED and text == CUSTOM_VOICE_OPTION:
+    if is_custom_voice_available(user_id) and text == CUSTOM_VOICE_OPTION:
         return await show_custom_voice_profile(update, context, contextual=True)
 
-    if CUSTOM_VOICE_PUBLIC_ENABLED and text in ["🎙 Создать мой голос", "🔄 Перезаписать голос"]:
+    if is_custom_voice_available(user_id) and text in ["🎙 Создать мой голос", "🔄 Перезаписать голос"]:
         return await begin_custom_voice_setup(update, context)
 
     if text in NUT_PACKAGES:
@@ -4240,11 +4258,11 @@ async def profile_view(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await ask_payment_email(update, context, text)
 
     if text == "👤 Личный кабинет":
-        return await show_profile(update, update.effective_user.id, contextual=True)
+        return await show_profile(update, user_id, contextual=True)
 
     await update.message.reply_text(
         "🌙 Выбери действие кнопкой ниже.",
-        reply_markup=flow_profile_keyboard()
+        reply_markup=flow_profile_keyboard(user_id)
     )
     return PROFILE_VIEW
 
@@ -4296,7 +4314,7 @@ async def payment_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             context,
             package_key,
             text,
-            reply_markup=flow_profile_keyboard(),
+            reply_markup=flow_profile_keyboard(update.effective_user.id),
         )
         return PROFILE_VIEW
 
@@ -4580,7 +4598,7 @@ async def char_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "🎤 Выбери голос будущей музыкальной колыбельной:",
-        reply_markup=voice_selection_keyboard()
+        reply_markup=voice_selection_keyboard(update.effective_user.id)
     )
 
     return VOICE
@@ -4591,14 +4609,14 @@ async def char_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 async def handle_custom_voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not CUSTOM_VOICE_PUBLIC_ENABLED:
+    user_id = update.effective_user.id
+
+    if not is_custom_voice_available(user_id):
         await update.message.reply_text(
             "🎤 Пожалуйста, выбери голос кнопкой.",
-            reply_markup=voice_selection_keyboard(),
+            reply_markup=voice_selection_keyboard(user_id),
         )
         return VOICE
-
-    user_id = update.effective_user.id
 
     if user_has_custom_voice(user_id):
         if get_nuts(user_id) < CUSTOM_VOICE_GENERATION_NUTS:
@@ -4645,7 +4663,7 @@ async def voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return CHAR_INPUT
 
-    if CUSTOM_VOICE_PUBLIC_ENABLED and text == CUSTOM_VOICE_OPTION:
+    if is_custom_voice_available(update.effective_user.id) and text == CUSTOM_VOICE_OPTION:
         return await handle_custom_voice_choice(update, context)
 
     allowed = ["👩 Женский голос", "👨 Мужской голос", "🧒 Детский голос"]
@@ -4653,7 +4671,7 @@ async def voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text not in allowed:
         await update.message.reply_text(
             "🎤 Пожалуйста, выбери голос кнопкой.",
-            reply_markup=voice_selection_keyboard()
+            reply_markup=voice_selection_keyboard(update.effective_user.id)
         )
         return VOICE
 
@@ -4685,7 +4703,7 @@ async def mood_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_back(text):
         await update.message.reply_text(
             "🎤 Вернёмся к выбору голоса:",
-            reply_markup=voice_selection_keyboard()
+            reply_markup=voice_selection_keyboard(update.effective_user.id)
         )
         return VOICE
 
@@ -5387,7 +5405,7 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🌰 Твой баланс: {nuts} орешков\n\n"
         f"Telegram ID: {update.effective_user.id}\n\n"
         f"1 орешек = персональная музыкальная колыбельная",
-        reply_markup=profile_keyboard()
+        reply_markup=profile_keyboard(update.effective_user.id)
     )
 
 
@@ -6089,7 +6107,7 @@ async def addnuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🌰 Начислено: {amount} орешков\n"
                 f"Текущий баланс: {balance} орешков"
             ),
-            reply_markup=profile_keyboard()
+            reply_markup=profile_keyboard(target_user_id)
         )
     except Exception as error:
         print("Не удалось уведомить пользователя о ручном начислении:", error)
@@ -6157,7 +6175,7 @@ async def removenuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"Списано: {amount}\n"
                 f"Текущий баланс: {balance} орешков"
             ),
-            reply_markup=profile_keyboard()
+            reply_markup=profile_keyboard(target_user_id)
         )
     except Exception as error:
         print("Не удалось уведомить пользователя о ручном списании:", error)
@@ -6316,7 +6334,7 @@ def main():
         "Создать колыбельную",
         *NUT_PACKAGES.keys(),
     ]
-    if CUSTOM_VOICE_PUBLIC_ENABLED:
+    if CUSTOM_VOICE_PUBLIC_ENABLED or CUSTOM_VOICE_ADMIN_ONLY:
         global_button_texts.append(CUSTOM_VOICE_OPTION)
     global_button_filter = filters.Regex(
         "^(" + "|".join(re.escape(text) for text in global_button_texts) + ")$"

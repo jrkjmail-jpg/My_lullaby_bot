@@ -298,10 +298,50 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertNotIn("сохранённым голосом", offer_text)
 
     def test_custom_voice_offer_text_can_be_enabled_later(self):
-        with patch.object(bot, "CUSTOM_VOICE_PUBLIC_ENABLED", True):
+        with patch.object(bot, "CUSTOM_VOICE_PUBLIC_ENABLED", True), \
+             patch.object(bot, "CUSTOM_VOICE_ADMIN_ONLY", False):
             offer_text = bot.build_nuts_offer_text()
 
         self.assertIn("сохранённым голосом стоит 3 орешка", offer_text)
+
+    def test_custom_voice_is_visible_only_for_admin_by_default(self):
+        with patch.object(bot, "CUSTOM_VOICE_PUBLIC_ENABLED", True), \
+             patch.object(bot, "CUSTOM_VOICE_ADMIN_ONLY", True), \
+             patch.object(bot, "CUSTOM_VOICE_ALLOWED_IDS", set()), \
+             patch.object(bot, "ADMIN_IDS", {42}):
+            self.assertTrue(bot.is_custom_voice_available(42))
+            self.assertFalse(bot.is_custom_voice_available(100500))
+            self.assertIn("сохранённым голосом", bot.build_nuts_offer_text(42))
+            self.assertNotIn("сохранённым голосом", bot.build_nuts_offer_text(100500))
+
+    def test_custom_voice_allowed_ids_limit_access_more_strictly_than_admins(self):
+        with patch.object(bot, "CUSTOM_VOICE_PUBLIC_ENABLED", True), \
+             patch.object(bot, "CUSTOM_VOICE_ADMIN_ONLY", True), \
+             patch.object(bot, "CUSTOM_VOICE_ALLOWED_IDS", {42}), \
+             patch.object(bot, "ADMIN_IDS", {42, 100500}):
+            self.assertTrue(bot.is_custom_voice_available(42))
+            self.assertFalse(bot.is_custom_voice_available(100500))
+            self.assertIn("сохранённым голосом", bot.build_nuts_offer_text(42))
+            self.assertNotIn("сохранённым голосом", bot.build_nuts_offer_text(100500))
+
+    def test_custom_voice_button_is_hidden_for_regular_user(self):
+        with patch.object(bot, "CUSTOM_VOICE_PUBLIC_ENABLED", True), \
+             patch.object(bot, "CUSTOM_VOICE_ADMIN_ONLY", True), \
+             patch.object(bot, "CUSTOM_VOICE_ALLOWED_IDS", set()), \
+             patch.object(bot, "ADMIN_IDS", {42}):
+            admin_buttons = [
+                button.text
+                for row in bot.profile_keyboard(42).keyboard
+                for button in row
+            ]
+            user_buttons = [
+                button.text
+                for row in bot.profile_keyboard(100500).keyboard
+                for button in row
+            ]
+
+        self.assertIn(bot.CUSTOM_VOICE_OPTION, admin_buttons)
+        self.assertNotIn(bot.CUSTOM_VOICE_OPTION, user_buttons)
 
     def test_custom_voice_profile_is_saved_in_database(self):
         user_id = 1017
