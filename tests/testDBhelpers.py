@@ -153,6 +153,53 @@ class DatabaseHelpersTest(unittest.TestCase):
         finally:
             bot.YOOKASSA_WEBHOOK_TOKEN = original_token
 
+    def test_private_chat_detection_for_sensitive_admin_commands(self):
+        private_update = SimpleNamespace(
+            effective_chat=SimpleNamespace(type="private"),
+        )
+        group_update = SimpleNamespace(
+            effective_chat=SimpleNamespace(type="group"),
+        )
+
+        self.assertTrue(bot.is_private_chat(private_update))
+        self.assertFalse(bot.is_private_chat(group_update))
+
+    def test_support_attachment_validation_limits_file_types_and_size(self):
+        image_document = SimpleNamespace(
+            file_size=1024,
+            mime_type="image/png",
+            file_name="check.png",
+        )
+        exe_document = SimpleNamespace(
+            file_size=1024,
+            mime_type="application/octet-stream",
+            file_name="virus.exe",
+        )
+        large_photo = SimpleNamespace(file_size=bot.SUPPORT_ATTACHMENT_MAX_FILE_BYTES + 1)
+
+        self.assertTrue(
+            bot.validate_support_attachment(
+                SimpleNamespace(photo=[], document=image_document)
+            )[0]
+        )
+        self.assertFalse(
+            bot.validate_support_attachment(
+                SimpleNamespace(photo=[], document=exe_document)
+            )[0]
+        )
+        self.assertFalse(
+            bot.validate_support_attachment(
+                SimpleNamespace(photo=[large_photo], document=None)
+            )[0]
+        )
+
+    def test_download_audio_rejects_unsafe_urls_before_request(self):
+        with self.assertRaises(ValueError):
+            bot.download_audio("http://example.com/song.mp3", "song.mp3")
+
+        with self.assertRaises(ValueError):
+            bot.download_audio("https://127.0.0.1/song.mp3", "song.mp3")
+
     def test_parse_age_allows_up_to_119_years(self):
         self.assertEqual(bot.parse_age("119")["display"], "119 лет")
         self.assertEqual(bot.parse_age("21")["display"], "21 год")

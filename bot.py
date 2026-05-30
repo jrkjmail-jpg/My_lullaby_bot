@@ -10,6 +10,7 @@ import threading
 import shutil
 import time
 import mimetypes
+import ipaddress
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
@@ -103,6 +104,11 @@ SUPPORT_ADMIN_CHAT_ID = (
 WEBHOOK_RATE_LIMIT = {}
 WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = 60
 WEBHOOK_RATE_LIMIT_MAX_REQUESTS = 60
+SUPPORT_MESSAGE_MAX_CHARS = int(os.getenv("SUPPORT_MESSAGE_MAX_CHARS", "1500"))
+SUPPORT_ATTACHMENT_MAX_FILE_BYTES = int(
+    os.getenv("SUPPORT_ATTACHMENT_MAX_FILE_BYTES", str(10 * 1024 * 1024))
+)
+AUDIO_DOWNLOAD_MAX_BYTES = int(os.getenv("AUDIO_DOWNLOAD_MAX_BYTES", str(30 * 1024 * 1024)))
 
 
 def is_path_inside(path, parent):
@@ -1862,6 +1868,15 @@ def clean_filename(text):
     return text.strip()[:80]
 
 
+def limit_text(text, max_chars):
+    text = (text or "").strip()
+
+    if len(text) <= max_chars:
+        return text
+
+    return text[:max_chars].rstrip()
+
+
 def generation_nuts_cost(data):
     if data.get("voice") == CUSTOM_VOICE_OPTION:
         return CUSTOM_VOICE_GENERATION_NUTS
@@ -2623,13 +2638,57 @@ def get_music_audio_urls(task_id):
 
 
 def download_audio(audio_url, filename):
-    response = requests.get(audio_url, timeout=120)
+    parsed_url = urlparse(audio_url)
+
+    if parsed_url.scheme != "https" or not parsed_url.hostname:
+        raise ValueError("Некорректная ссылка на аудио")
+
+    host = parsed_url.hostname.lower()
+
+    if host in {"localhost"} or host.endswith(".localhost"):
+        raise ValueError("Небезопасная ссылка на аудио")
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+
+    if ip and (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved):
+        raise ValueError("Небезопасная ссылка на аудио")
+
+    response = requests.get(audio_url, timeout=120, stream=True)
     response.raise_for_status()
 
-    path = os.path.join(tempfile.gettempdir(), filename)
+    content_length = response.headers.get("Content-Length")
 
-    with open(path, "wb") as file:
-        file.write(response.content)
+    if content_length:
+        try:
+            content_length_int = int(content_length)
+        except ValueError:
+            raise ValueError("Некорректный размер аудиофайла")
+
+        if content_length_int > AUDIO_DOWNLOAD_MAX_BYTES:
+            raise ValueError("Аудиофайл слишком большой")
+
+    path = os.path.join(tempfile.gettempdir(), filename)
+    downloaded = 0
+
+    try:
+        with open(path, "wb") as file:
+            for chunk in response.iter_content(chunk_size=1024 * 256):
+                if not chunk:
+                    continue
+
+                downloaded += len(chunk)
+
+                if downloaded > AUDIO_DOWNLOAD_MAX_BYTES:
+                    raise ValueError("Аудиофайл слишком большой")
+
+                file.write(chunk)
+    except Exception:
+        if os.path.exists(path):
+            os.remove(path)
+        raise
 
     return path
 
@@ -3618,6 +3677,15 @@ async def process_support_message(update: Update, context: ContextTypes.DEFAULT_
         )
         return SUPPORT_CHAT
 
+    if len(message) > SUPPORT_MESSAGE_MAX_CHARS:
+        await update.message.reply_text(
+            "💬 Сообщение получилось слишком длинным.\n\n"
+            f"Напиши, пожалуйста, короче — до {SUPPORT_MESSAGE_MAX_CHARS} символов. "
+            "Если нужно показать чек или ошибку, можно отправить скриншот.",
+            reply_markup=support_keyboard(),
+        )
+        return SUPPORT_CHAT
+
     log_support_message(user_id, "user", message)
 
     if not SUPPORT_AI_ENABLED:
@@ -3695,15 +3763,52 @@ async def support_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await process_support_message(update, context, text)
 
 
+def validate_support_attachment(message):
+    if message.photo:
+        largest_photo = message.photo[-1]
+
+        if largest_photo.file_size and largest_photo.file_size > SUPPORT_ATTACHMENT_MAX_FILE_BYTES:
+            return False, "Файл слишком большой. Пришли, пожалуйста, скрин или чек до 10 МБ."
+
+        return True, ""
+
+    document = message.document
+
+    if not document:
+        return False, "Пришли, пожалуйста, скриншот, фото или PDF-чек."
+
+    if document.file_size and document.file_size > SUPPORT_ATTACHMENT_MAX_FILE_BYTES:
+        return False, "Файл слишком большой. Пришли, пожалуйста, скрин или чек до 10 МБ."
+
+    mime_type = document.mime_type or ""
+    file_name = (document.file_name or "").lower()
+    allowed_mime_types = {"application/pdf", "text/plain"}
+
+    if (
+        mime_type.startswith("image/")
+        or mime_type in allowed_mime_types
+        or file_name.endswith((".jpg", ".jpeg", ".png", ".webp", ".pdf", ".txt"))
+    ):
+        return True, ""
+
+    return False, "В поддержку можно отправить фото, скриншот, PDF-чек или текстовый файл."
+
+
 async def support_attachment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     if not user:
         return SUPPORT_CHAT
 
+    ok, error = validate_support_attachment(update.message)
+
+    if not ok:
+        await update.message.reply_text(error, reply_markup=support_keyboard())
+        return SUPPORT_CHAT
+
     create_user_if_not_exists(user)
     ensure_support_thread(user.id)
-    caption = update.message.caption or ""
+    caption = limit_text(update.message.caption or "", SUPPORT_MESSAGE_MAX_CHARS)
     attachment_note = caption or "Пользователь отправил вложение без подписи"
     log_support_message(user.id, "user", f"[вложение] {attachment_note}")
     set_support_status(user.id, "admin")
@@ -3760,7 +3865,12 @@ async def support_reply_command(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("💬 Напиши текст ответа после user_id.")
         return
 
-    create_user_id_if_not_exists(target_user_id)
+    if not user_exists(target_user_id):
+        await update.message.reply_text(
+            "💬 Такого пользователя нет в базе. Проверь user_id или отвечай reply на обращение в группе поддержки."
+        )
+        return
+
     log_support_message(target_user_id, "admin", message)
     set_support_status(target_user_id, "admin")
 
@@ -5377,8 +5487,7 @@ async def send_bulk_message(bot, user_ids, text, reply_markup=None, mark_reminde
 
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     message = get_command_payload(update)
@@ -5413,8 +5522,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def maintenance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     details = get_command_payload(update)
@@ -5447,8 +5555,7 @@ async def maintenance_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def remindnow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     user_ids = get_users_for_reminder()
@@ -5473,8 +5580,7 @@ async def remindnow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def remindpreview_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     await update.message.reply_text(
@@ -5490,8 +5596,7 @@ async def remindpreview_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     all_user_ids = get_all_user_ids()
@@ -5532,8 +5637,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def dbstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     stats = get_database_stats()
@@ -5563,8 +5667,7 @@ async def dbstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def paystatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     warnings = get_yookassa_config_warnings()
@@ -5594,8 +5697,7 @@ async def paystatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def storagecheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     stats = get_database_stats()
@@ -5624,8 +5726,7 @@ async def storagecheck_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def backupdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     await update.message.reply_text("🧷 Готовлю резервную копию базы...")
@@ -5643,8 +5744,7 @@ async def backupdb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def restoredb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     if len(context.args) != 1 or context.args[0].lower() != "confirm":
@@ -5667,6 +5767,9 @@ async def restoredb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def restoredb_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_admin(update.effective_user.id):
+        return
+
+    if not is_private_chat(update):
         return
 
     if not context.user_data.get("awaiting_db_restore"):
@@ -5765,6 +5868,25 @@ def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
+def is_private_chat(update: Update):
+    return bool(update.effective_chat and update.effective_chat.type == "private")
+
+
+async def require_admin(update: Update, private=False):
+    if not update.effective_user or not is_admin(update.effective_user.id):
+        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+        return False
+
+    if private and not is_private_chat(update):
+        await update.message.reply_text(
+            "🔐 Для безопасности эта админ-команда работает только в личном чате с ботом.\n\n"
+            "Открой диалог с Колыбелкой и отправь команду там."
+        )
+        return False
+
+    return True
+
+
 def build_commands_text():
     return (
         "📋 Команды Колыбелки\n\n"
@@ -5804,16 +5926,14 @@ def parse_admin_target_user_id(update: Update, raw_user_id):
 
 
 async def commands_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     await update.message.reply_text(build_commands_text())
 
 
 async def addnuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     if len(context.args) != 2:
@@ -5880,8 +6000,7 @@ async def addnuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def removenuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     if len(context.args) != 2:
@@ -5949,8 +6068,7 @@ async def removenuts_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def deleteuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update, private=True):
         return
 
     if len(context.args) != 2 or context.args[1].lower() != "confirm":
