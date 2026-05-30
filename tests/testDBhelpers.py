@@ -3,6 +3,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -163,6 +164,38 @@ class DatabaseHelpersTest(unittest.TestCase):
 
         self.assertTrue(bot.is_private_chat(private_update))
         self.assertFalse(bot.is_private_chat(group_update))
+
+    def test_telegram_chat_security_guard_blocks_unknown_groups(self):
+        group_update = SimpleNamespace(
+            effective_chat=SimpleNamespace(type="group", id=-1001),
+            effective_user=SimpleNamespace(id=555),
+            message=SimpleNamespace(text="hello", caption=None),
+        )
+
+        with self.assertRaises(bot.ApplicationHandlerStop):
+            asyncio.run(bot.telegram_chat_security_guard(group_update, None))
+
+    def test_telegram_chat_security_guard_allows_private_chat(self):
+        private_update = SimpleNamespace(
+            effective_chat=SimpleNamespace(type="private", id=555),
+            effective_user=SimpleNamespace(id=555),
+            message=SimpleNamespace(text="/start", caption=None),
+        )
+
+        asyncio.run(bot.telegram_chat_security_guard(private_update, None))
+
+    def test_music_generation_lock_blocks_parallel_generation(self):
+        user_id = 123456
+        bot.end_music_generation_for_user(user_id)
+
+        try:
+            self.assertTrue(bot.begin_music_generation_for_user(user_id))
+            self.assertFalse(bot.begin_music_generation_for_user(user_id))
+        finally:
+            bot.end_music_generation_for_user(user_id)
+
+        self.assertTrue(bot.begin_music_generation_for_user(user_id))
+        bot.end_music_generation_for_user(user_id)
 
     def test_support_attachment_validation_limits_file_types_and_size(self):
         image_document = SimpleNamespace(

@@ -22,6 +22,7 @@ from openai import OpenAI
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CommandHandler,
     MessageHandler,
     ConversationHandler,
@@ -109,6 +110,7 @@ SUPPORT_ATTACHMENT_MAX_FILE_BYTES = int(
     os.getenv("SUPPORT_ATTACHMENT_MAX_FILE_BYTES", str(10 * 1024 * 1024))
 )
 AUDIO_DOWNLOAD_MAX_BYTES = int(os.getenv("AUDIO_DOWNLOAD_MAX_BYTES", str(30 * 1024 * 1024)))
+ACTIVE_MUSIC_GENERATIONS = set()
 
 
 def is_path_inside(path, parent):
@@ -1882,6 +1884,18 @@ def generation_nuts_cost(data):
         return CUSTOM_VOICE_GENERATION_NUTS
 
     return NUTS_PER_GENERATION
+
+
+def begin_music_generation_for_user(user_id):
+    if user_id in ACTIVE_MUSIC_GENERATIONS:
+        return False
+
+    ACTIVE_MUSIC_GENERATIONS.add(user_id)
+    return True
+
+
+def end_music_generation_for_user(user_id):
+    ACTIVE_MUSIC_GENERATIONS.discard(user_id)
 
 
 def format_price(price):
@@ -3896,7 +3910,7 @@ async def support_group_reply_handler(update: Update, context: ContextTypes.DEFA
     if not update.message:
         return
 
-    if update.effective_user and not is_admin(update.effective_user.id):
+    if not update.effective_user or not is_admin(update.effective_user.id):
         return
 
     target_user_id = None
@@ -3936,8 +3950,7 @@ async def support_group_reply_handler(update: Update, context: ContextTypes.DEFA
 
 
 async def supportchatid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user and not is_admin(update.effective_user.id):
-        await update.message.reply_text("🌙 Эта команда доступна только администратору.")
+    if not await require_admin(update):
         return
 
     await update.message.reply_text(
@@ -5131,7 +5144,16 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     nuts_cost = generation_nuts_cost(data)
     nuts_cost_title = make_nuts_title(nuts_cost)
 
+    if not begin_music_generation_for_user(user_id):
+        await update.message.reply_text(
+            "🎵 Колыбельная уже создаётся.\n\n"
+            "Пожалуйста, дождись результата. Орешки спишутся только после отправки готовой песни.",
+            reply_markup=generation_wait_keyboard()
+        )
+        return GENERATE_MUSIC
+
     if get_nuts(user_id) < nuts_cost:
+        end_music_generation_for_user(user_id)
         await update.message.reply_text(
             f"🌙 Для создания этой музыки нужно {nuts_cost_title}.\n\n"
             f"Сейчас на балансе: {get_nuts(user_id)}",
@@ -5142,6 +5164,7 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lullaby_text = data.get("lullaby_text")
 
     if not lullaby_text:
+        end_music_generation_for_user(user_id)
         await update.message.reply_text(
             "🌙 Не нашла готовый текст колыбельной.\n\n"
             "Похоже, бот перезапускался или старый шаг уже устарел. "
@@ -5158,6 +5181,10 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=generation_wait_keyboard()
     )
 
+    file_path = None
+    nuts_charged = False
+    audio_sent = False
+
     try:
         started_at = time.monotonic()
         genitive_name = make_genitive_name(data["name"], data.get("gender", ""))
@@ -5170,6 +5197,7 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
             persona_id = voice_profile["voice_id"]
 
             if not persona_id:
+                end_music_generation_for_user(user_id)
                 await update.message.reply_text(
                     "🎙 Чтобы создать колыбельную своим голосом, сначала нужно привязать голос.",
                     reply_markup=custom_voice_profile_keyboard(False, contextual=True),
@@ -5244,6 +5272,18 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
             timeout=max(1, seconds_left(started_at, MUSIC_GENERATION_TIMEOUT_SECONDS)),
         )
 
+        nuts_removed = remove_nuts(user_id, nuts_cost)
+
+        if not nuts_removed:
+            await update.message.reply_text(
+                "⚠️ Не смогла безопасно списать орешки, поэтому не отправляю файл.\n\n"
+                "Похоже, баланс изменился во время создания песни. Проверь личный кабинет или напиши в поддержку.",
+                reply_markup=main_menu_keyboard()
+            )
+            return START
+
+        nuts_charged = True
+
         with open(file_path, "rb") as audio_file:
             await update.message.reply_document(
                 document=audio_file,
@@ -5254,23 +5294,13 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 connect_timeout=60,
                 pool_timeout=180
             )
+            audio_sent = True
 
-        os.remove(file_path)
-
-        nuts_removed = remove_nuts(user_id, nuts_cost)
         balance = get_nuts(user_id)
         mark_lullaby_created(user_id)
         add_lullabies(user_id, 1)
 
         context.user_data.clear()
-
-        if not nuts_removed:
-            await update.message.reply_text(
-                "⚠️ Колыбельная отправлена, но я не смогла списать орешек с баланса.\n\n"
-                "Пожалуйста, напиши поддержке, чтобы мы проверили личный кабинет.",
-                reply_markup=main_menu_keyboard()
-            )
-            return START
 
         await update.message.reply_text(
             f"🌙 Всё готово!\n\n"
@@ -5286,6 +5316,17 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except asyncio.TimeoutError:
         print("Suno/музыка: превышено время ожидания")
 
+        if audio_sent:
+            await update.message.reply_text(
+                "🌙 Колыбельная отправлена.\n\n"
+                "Если финальное сообщение не дошло, проверь баланс в личном кабинете.",
+                reply_markup=main_menu_keyboard()
+            )
+            return START
+
+        if nuts_charged:
+            add_nuts(user_id, nuts_cost)
+
         await update.message.reply_text(
             "😔 Музыкальная колыбельная создаётся слишком долго, похоже связь с сервисом оборвалась.\n\n"
             "🌰 Орешек не списан.\n\n"
@@ -5297,6 +5338,17 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as error:
         print("Ошибка Suno/музыки:", error)
 
+        if audio_sent:
+            await update.message.reply_text(
+                "🌙 Колыбельная отправлена.\n\n"
+                "Если финальное сообщение не дошло, проверь баланс в личном кабинете.",
+                reply_markup=main_menu_keyboard()
+            )
+            return START
+
+        if nuts_charged:
+            add_nuts(user_id, nuts_cost)
+
         await update.message.reply_text(
             "😔 Не получилось создать музыкальную колыбельную.\n\n"
             "🌰 Орешек не списан.\n\n"
@@ -5304,6 +5356,11 @@ async def generate_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=create_music_keyboard()
         )
         return GENERATE_MUSIC
+    finally:
+        end_music_generation_for_user(user_id)
+
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
 
 
 # =========================
@@ -5872,6 +5929,45 @@ def is_private_chat(update: Update):
     return bool(update.effective_chat and update.effective_chat.type == "private")
 
 
+def is_support_admin_chat(update: Update):
+    return bool(SUPPORT_ADMIN_CHAT_ID and update.effective_chat and update.effective_chat.id == SUPPORT_ADMIN_CHAT_ID)
+
+
+def is_supportchatid_request(update: Update):
+    text = ""
+
+    if update.message:
+        text = update.message.text or update.message.caption or ""
+
+    parts = text.strip().split(maxsplit=1)
+
+    if not parts:
+        return False
+
+    return parts[0].split("@", 1)[0].lower() == "/supportchatid"
+
+
+async def telegram_chat_security_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_private_chat(update):
+        return
+
+    if is_support_admin_chat(update):
+        if update.effective_user and is_admin(update.effective_user.id):
+            return
+        raise ApplicationHandlerStop
+
+    if update.effective_user and is_admin(update.effective_user.id) and is_supportchatid_request(update):
+        return
+
+    if update.message and update.message.text and update.message.text.startswith("/"):
+        await update.message.reply_text(
+            "🔐 Колыбелка работает только в личном чате с ботом.\n\n"
+            "Напиши мне в личные сообщения, чтобы создать колыбельную или открыть кабинет."
+        )
+
+    raise ApplicationHandlerStop
+
+
 async def require_admin(update: Update, private=False):
     if not update.effective_user or not is_admin(update.effective_user.id):
         await update.message.reply_text("🌙 Эта команда доступна только администратору.")
@@ -6288,6 +6384,7 @@ def main():
         allow_reentry=True,
     )
 
+    app.add_handler(MessageHandler(filters.ALL, telegram_chat_security_guard), group=-3)
     app.add_handler(MessageHandler(filters.ALL, track_user_activity), group=-2)
     app.add_handler(conversation)
     app.add_handler(CommandHandler("balance", balance_command), group=-1)
