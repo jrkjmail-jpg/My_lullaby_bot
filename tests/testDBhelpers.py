@@ -283,11 +283,11 @@ class DatabaseHelpersTest(unittest.TestCase):
         offer_text = bot.build_nuts_offer_text()
 
         self.assertIn("1 орешек", offer_text)
-        self.assertIn("449 ₽", offer_text)
+        self.assertIn("199 ₽", offer_text)
         self.assertIn("2 орешка", offer_text)
-        self.assertIn("599 ₽", offer_text)
+        self.assertIn("349 ₽", offer_text)
         self.assertIn("3 орешка", offer_text)
-        self.assertIn("699 ₽", offer_text)
+        self.assertIn("499 ₽", offer_text)
         self.assertIn("Обычная колыбельная стоит 1 орешек", offer_text)
         self.assertNotIn("сохранённым голосом", offer_text)
 
@@ -466,7 +466,7 @@ class DatabaseHelpersTest(unittest.TestCase):
                 "status": "succeeded",
                 "paid": True,
                 "amount": {
-                    "value": "699.00",
+                    "value": "499.00",
                     "currency": "RUB",
                 },
                 "metadata": {
@@ -510,7 +510,7 @@ class DatabaseHelpersTest(unittest.TestCase):
                 "status": "succeeded",
                 "paid": True,
                 "amount": {
-                    "value": "449.00",
+                    "value": "199.00",
                     "currency": "RUB",
                 },
                 "metadata": {
@@ -546,7 +546,7 @@ class DatabaseHelpersTest(unittest.TestCase):
                 "status": "succeeded",
                 "paid": True,
                 "amount": {
-                    "value": "599.00",
+                    "value": "349.00",
                     "currency": "RUB",
                 },
                 "metadata": {
