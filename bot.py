@@ -1762,7 +1762,10 @@ def make_genitive_name(name, gender=""):
     if lower.endswith("ья"):
         return name[:-1] + "и"
 
-    if lower.endswith(("а", "я")):
+    if lower.endswith("я"):
+        return name[:-1] + "и"
+
+    if lower.endswith("а"):
         if lower.endswith(("га", "ка", "ха", "жа", "ча", "ша", "ща")):
             return name[:-1] + "и"
         return name[:-1] + "ы"

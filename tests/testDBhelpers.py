@@ -660,6 +660,10 @@ class DatabaseHelpersTest(unittest.TestCase):
         self.assertEqual(bot.make_genitive_name("Игорь", "👦 Мальчик"), "Игоря")
         self.assertEqual(bot.make_genitive_name("Алиса", "👧 Девочка"), "Алисы")
         self.assertEqual(bot.make_genitive_name("София", "👧 Девочка"), "Софии")
+        self.assertEqual(bot.make_genitive_name("Соня", "👧 Девочка"), "Сони")
+        self.assertEqual(bot.make_genitive_name("Таня", "👧 Девочка"), "Тани")
+        self.assertEqual(bot.make_genitive_name("Котя", "👦 Мальчик"), "Коти")
+        self.assertEqual(bot.make_genitive_name("Никита", "👦 Мальчик"), "Никиты")
 
 
 if __name__ == "__main__":
